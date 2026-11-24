@@ -1,0 +1,53 @@
+{
+  "横屏常规底部 (16:9)": {
+    "main_roi": [
+      0.08,
+      0.81,
+      0.92,
+      0.92
+    ],
+    "main_white_only": true,
+    "extract_notes": true,
+    "note_roi": [
+      0.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    "note_min_height_ratio": 0.038
+  },
+  "竖屏常规底部 (9:16 避开抖音上下UI)": {
+    "main_roi": [
+      0.05,
+      0.72,
+      0.95,
+      0.88
+    ],
+    "main_white_only": true,
+    "extract_notes": true,
+    "note_roi": [
+      0.0,
+      0.1,
+      1.0,
+      0.85
+    ],
+    "note_min_height_ratio": 0.032
+  },
+  "横屏老剪辑偏高字幕 (双行适用)": {
+    "main_roi": [
+      0.08,
+      0.74,
+      0.92,
+      0.91
+    ],
+    "main_white_only": true,
+    "extract_notes": true,
+    "note_roi": [
+      0.0,
+      0.0,
+      1.0,
+      0.9
+    ],
+    "note_min_height_ratio": 0.038
+  }
+}

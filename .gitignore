@@ -1,0 +1,27 @@
+# Python 编译与虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# PyInstaller 打包产物与临时配置
+build/
+dist/
+*.spec
+
+# 离线模型权重与内置 FFmpeg 二进制（随 Release 绿色包分发，不入 Git 源码库）
+models/ppocr_v5/*.onnx
+models/*.onnx
+bin/
+
+# 本地运行日志、测试视频与环境变量
+*.mp4
+*.mov
+*.mkv
+*.log
+_extract_log.txt
+_burn_log.txt
+.env
+.DS_Store
+Thumbs.db
