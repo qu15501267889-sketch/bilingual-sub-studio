@@ -10,10 +10,12 @@ build/
 dist/
 *.spec
 
-# 离线模型权重与内置 FFmpeg 二进制（随 Release 绿色包分发，不入 Git 源码库）
+# 离线模型权重、内置运行时与 FFmpeg 二进制（随 Release 绿色包分发，不入 Git 源码库）
 models/ppocr_v5/*.onnx
 models/*.onnx
+models/llm/*.gguf
 bin/
+runtime/
 
 # 本地运行日志、测试视频与密钥配置
 *.mp4

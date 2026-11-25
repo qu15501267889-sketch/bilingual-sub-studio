@@ -83,6 +83,71 @@ def run_translate_smoke_test() -> int:
     return 0
 
 
+def run_embedded_ollama_test() -> int:
+    """校验 GGUF 自动命名规则，并在独立隔离端口上验证内置 runtime/ollama/ollama.exe 独立启动与退出。"""
+    import urllib.request
+    from core.embedded_ollama import (
+        ensure_ollama_running,
+        infer_model_tag_and_modelfile,
+        stop_embedded_ollama,
+    )
+    from core.runtime_paths import get_embedded_ollama_exe
+
+    print("=== 开始内置 Ollama 引擎与 GGUF 自动识别自测 ===")
+    # 1) 验证推荐模型文件名推断与 mmproj 跳过逻辑
+    cases = [
+        ("Index-Translate-9B.Q4_K_M.gguf", "hf.co/IndexTeam/Index-Translate-9B-GGUF:Q4_K_M"),
+        ("Index-Translate-9B.IQ4_XS.gguf", "index-translate-9b:iq4_xs"),
+        ("Hy-MT2-7B-Q4_K_M.gguf", "hy-mt2-7b:q4_k_m"),
+        ("Hy-MT2-1.8B-Q4_K_M.gguf", "hy-mt2-1.8b:q4_k_m"),
+        ("Qwen3-8B-Q4_K_M.gguf", "qwen3-8b:q4_k_m"),
+    ]
+    for fn, exp_tag in cases:
+        got_tag, got_mf = infer_model_tag_and_modelfile(Path(fn))
+        print(f"  [推断] {fn} -> {got_tag}")
+        if got_tag != exp_tag or "FROM " not in got_mf:
+            print(f"[FAIL] 推断异常: 期望 {exp_tag}, 实际 {got_tag}")
+            return 41
+
+    try:
+        infer_model_tag_and_modelfile(Path("Index-Translate-9B.mmproj-Q8_0.gguf"))
+        print("[FAIL] 未正确跳过 mmproj 文件")
+        return 42
+    except ValueError as exc:
+        print(f"  [过滤mmproj] 正常跳过: {exc}")
+
+    # 2) 在独立端口 11439 与临时 OLLAMA_MODELS 目录验证内置 ollama.exe serve 启动与退出
+    emb_exe = get_embedded_ollama_exe()
+    if emb_exe is None:
+        print("[FAIL] 当前绿色包未包含 runtime/ollama/ollama.exe")
+        return 43
+
+    print(f"  [内置路径] {emb_exe}")
+    with tempfile.TemporaryDirectory() as tmp_m:
+        state = ensure_ollama_running(
+            preferred_url="http://127.0.0.1:11434",
+            force_embedded_port=11439,
+            models_dir_override=Path(tmp_m),
+        )
+        print("  [启动状态]", state)
+        if not state.get("running"):
+            print(f"[FAIL] 内置 Ollama 隔离启动失败: {state}")
+            return 44
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open("http://127.0.0.1:11439/api/version", timeout=3) as resp:
+            ver_body = resp.read().decode("utf-8", errors="replace").strip()
+            print(f"  [/api/version] HTTP {resp.status} -> {ver_body}")
+            if resp.status != 200:
+                stop_embedded_ollama()
+                return 45
+
+        stop_embedded_ollama()
+
+    print("[EMBEDDED-OLLAMA PASS] 内置 Ollama 引擎独立拉起与自动收尾验证通过！")
+    return 0
+
+
 def run_self_test(video_path: Path) -> int:
     """无窗口端到端自测模式：验证 PP-OCRv5 DirectML + (X,Y)自由定位 + 花字覆写 + 内置 FFmpeg 全链路。"""
     import cv2
@@ -113,7 +178,7 @@ def run_self_test(video_path: Path) -> int:
         run_silent,
     )
 
-    print("=== 开始 V1.5 全链路自测 ===")
+    print("=== 开始 V1.5.1 全链路自测 ===")
     print("AppDir :", get_app_dir())
     print("Models :", get_models_dir())
     print("FFmpeg :", get_ffmpeg_exe())
@@ -244,8 +309,9 @@ def run_self_test(video_path: Path) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="双语字幕工坊 V1.5")
+    parser = argparse.ArgumentParser(description="双语字幕工坊 V1.5.1")
     parser.add_argument("--self-test", type=Path, default=None, help="运行无窗口端到端自测模式")
+    parser.add_argument("--test-embedded-ollama", action="store_true", help="在隔离端口验证内置 Ollama 启动、版本探测、GGUF推断与退出")
     parser.add_argument("--test-translate", action="store_true", help="运行内置 AI 翻译冒烟自测（本机 Ollama Index-Translate-9B）")
     parser.add_argument("--log-file", type=Path, default=None, help="将自测日志写入指定文件")
     args, _unknown = parser.parse_known_args()
@@ -263,6 +329,12 @@ def main() -> None:
     if args.self_test is not None:
         ran_cli_test = True
         exit_code = run_self_test(args.self_test)
+        if exit_code != 0:
+            sys.stdout.flush()
+            sys.exit(exit_code)
+    if args.test_embedded_ollama:
+        ran_cli_test = True
+        exit_code = run_embedded_ollama_test()
         if exit_code != 0:
             sys.stdout.flush()
             sys.exit(exit_code)

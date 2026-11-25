@@ -1,0 +1,31 @@
+==================== 本地离线翻译模型（GGUF）存放与一键导入说明 ====================
+
+把下面任意一个下载好的 `.gguf` 模型文件直接放进当前文件夹（即 `models\llm\`）：
+
+【使用方法（全自动，零命令行）】
+1. 将下载的 `.gguf` 文件放进本文件夹；
+2. 打开软件进入第 2 步「内置 AI 自动翻译」页；
+3. 点击「扫描导入本地模型」按钮（或直接运行「一键全自动一条龙」），软件会自动拉起内置 Ollama 并把 `.gguf` 注册配置完成（默认优先识别并配好 B 站模型的无思考快速模板）。
+
+----------------------------------------------------------------------------
+【推荐翻译模型清单与 Hugging Face 下载直链（按 8G 显存适配程度排序）】
+
+1. 🥇 首推（短视频/方言/二创热梗最强，8G 显存甜点）：B 站 Index-Translate-9B
+   - 主力推荐 Q4_K_M（5.78 GB，导入后自动匹配默认模型名，不用改配置）：
+     https://huggingface.co/IndexTeam/Index-Translate-9B-GGUF/resolve/main/Index-Translate-9B.Q4_K_M.gguf
+   - 偏紧 8G 显存可选 IQ4_XS（5.36 GB，省约 0.4 GB 显存）：
+     https://huggingface.co/IndexTeam/Index-Translate-9B-GGUF/resolve/main/Index-Translate-9B.IQ4_XS.gguf
+
+2. 🥈 专业高速备选（专用机器翻译模型，速度快）：腾讯 Hy-MT2-7B
+   - Q4_K_M 直链：
+     https://huggingface.co/tencent/Hy-MT2-7B-GGUF/resolve/main/Hy-MT2-7B-Q4_K_M.gguf
+
+3. ⚡ 轻量低显存/无独显电脑救星：腾讯 Hy-MT2-1.8B
+   - Q4_K_M 直链：
+     https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/main/Hy-MT2-1.8B-Q4_K_M.gguf
+
+4. 🥉 通用型强推（中文语境推理兜底）：阿里 Qwen3-8B
+   - Q4_K_M 直链：
+     https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
+
+（注：不要只下载 `*mmproj*.gguf` 附件，下载主体模型文件即可；如果你本机已经通过命令行 `ollama pull` 装过模型，软件会直接共用，无需重复下载放置。）

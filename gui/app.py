@@ -26,6 +26,12 @@ from core.burner import (
     render_burn_preview_with_meta,
     scan_burn_matches,
 )
+from core.embedded_ollama import (
+    ensure_ollama_running,
+    has_unimported_local_ggufs,
+    scan_and_import_local_ggufs,
+    stop_embedded_ollama,
+)
 from core.extractor import (
     OCR_PROFILE_CHOICES,
     VIDEO_EXTS,
@@ -39,6 +45,7 @@ from core.extractor import (
 from core.runtime_paths import (
     get_app_dir,
     get_ffmpeg_exe,
+    get_llm_drop_dir,
     load_glossary,
     load_presets,
     load_translator_config,
@@ -91,11 +98,11 @@ def _fmt_sec(sec: float) -> str:
 
 
 class BilingualSubStudioApp(tk.Tk):
-    """双语字幕工坊 V1.5（一条龙自动翻译 · PP-OCRv5 · 自由(X,Y)拖拽排版）。"""
+    """双语字幕工坊 V1.5.1（一条龙自动翻译 · 内置/外置 Ollama · 自由(X,Y)拖拽排版）。"""
 
     def __init__(self):
         super().__init__()
-        self.title("双语字幕工坊 V1.5（一条龙自动翻译 · PP-OCRv5 · 自由(X,Y)拖拽排版）")
+        self.title("双语字幕工坊 V1.5.1（一条龙自动翻译 · 内置/外置 Ollama · 自由(X,Y)拖拽排版）")
         sw = max(1220, self.winfo_screenwidth())
         sh = max(820, self.winfo_screenheight())
         self.geometry(f"{min(1440, sw - 50)}x{min(940, sh - 70)}")
@@ -191,7 +198,7 @@ class BilingualSubStudioApp(tk.Tk):
             font=("Microsoft YaHei UI", 9, "bold"),
         ).pack(side=tk.RIGHT)
 
-        ttk.Label(bar, text="双语字幕工坊 V1.5", font=("Microsoft YaHei UI", 13, "bold")).pack(side=tk.LEFT)
+        ttk.Label(bar, text="双语字幕工坊 V1.5.1", font=("Microsoft YaHei UI", 13, "bold")).pack(side=tk.LEFT)
         ttk.Label(
             bar,
             text="  |  一键全自动一条龙（提取 → AI翻译 → 烧录） · 亦保留手动 Agent 与逐帧校对",
@@ -239,12 +246,16 @@ class BilingualSubStudioApp(tk.Tk):
             enc_short = {"hevc_amf": "AMD硬编", "hevc_nvenc": "NVENC", "x264_cpu": "CPU软编"}.get(enc, enc)
 
             ollama_url = self._trans_cfg_dict.get("ollama_url", "http://127.0.0.1:11434")
+            ol_state = ensure_ollama_running(ollama_url)
             models: list[str] = []
             try:
                 models = list_ollama_models(ollama_url)
-                ol_tag = f"Ollama({len(models)}模型)"
+                prefix = "内置Ollama" if "embedded" in str(ol_state.get("mode", "")) else "外置Ollama"
+                pending_ggufs = has_unimported_local_ggufs(models)
+                pending_tip = f",待导入{len(pending_ggufs)}" if pending_ggufs else ""
+                ol_tag = f"{prefix}({len(models)}模型{pending_tip})"
             except Exception:
-                ol_tag = "Ollama(未启动/使用API)"
+                ol_tag = "Ollama(需放入GGUF或用API)" if ol_state.get("has_embedded") else "Ollama(未启动/使用API)"
 
             def _apply():
                 self.var_hw_status.set(f"{ff_tag} | {ocr_short} | {ol_tag} | {enc_short}")
@@ -539,7 +550,7 @@ class BilingualSubStudioApp(tk.Tk):
         ttk.Radiobutton(p_row, text="云端 OpenAI 兼容 API", variable=self.var_trans_provider, value="openai", command=self._save_trans_cfg_from_ui).pack(side=tk.LEFT, padx=6)
 
         # Ollama 区块
-        ol_box = ttk.LabelFrame(eng_box, text="本机 Ollama 设置（支持 B站 Index-Translate-9B / Hy-MT / Qwen）", padding=6)
+        ol_box = ttk.LabelFrame(eng_box, text="本机 Ollama 设置（支持放 .gguf 到 models/llm 一键导入；内置版无需另装）", padding=6)
         ol_box.pack(fill=tk.X, pady=(0, 6))
         self.var_ollama_url = tk.StringVar(value=str(self._trans_cfg_dict.get("ollama_url", "http://127.0.0.1:11434")))
         self.var_ollama_model = tk.StringVar(value=str(self._trans_cfg_dict.get("ollama_model", "hf.co/IndexTeam/Index-Translate-9B-GGUF:Q4_K_M")))
@@ -548,7 +559,14 @@ class BilingualSubStudioApp(tk.Tk):
         ttk.Label(ol_box, text="选择模型：").grid(row=1, column=0, sticky="w", pady=2)
         self.cmb_ollama_model = ttk.Combobox(ol_box, textvariable=self.var_ollama_model, values=[self.var_ollama_model.get()])
         self.cmb_ollama_model.grid(row=1, column=1, sticky="ew", padx=4, pady=2)
-        ttk.Button(ol_box, text="🔄 刷新列表", width=10, command=self._refresh_ollama_models_ui).grid(row=1, column=2, pady=2)
+        ttk.Button(ol_box, text="🔄 刷新列表", width=11, command=self._refresh_ollama_models_ui).grid(row=1, column=2, pady=2)
+        self.btn_import_gguf = ttk.Button(
+            ol_box,
+            text="📥 扫描导入 models/llm 本地模型",
+            command=self._import_local_ggufs_async,
+        )
+        self.btn_import_gguf.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(3, 0), padx=(0, 4))
+        ttk.Button(ol_box, text="📂 模型目录", width=11, command=self._open_llm_drop_folder).grid(row=2, column=2, pady=(3, 0))
         ol_box.columnconfigure(1, weight=1)
 
         # 云端 API 区块
@@ -1560,14 +1578,24 @@ class BilingualSubStudioApp(tk.Tk):
             messagebox.showinfo("已保存", "AI 翻译引擎配置已保存到本地 config/translator.json。")
         return cfg
 
+    def _open_llm_drop_folder(self) -> None:
+        drop_dir = get_llm_drop_dir()
+        drop_dir.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(drop_dir))
+
     def _refresh_ollama_models_ui(self) -> None:
         url = self.var_ollama_url.get().strip() or "http://127.0.0.1:11434"
 
         def _worker():
+            state = ensure_ollama_running(url)
+            if not state.get("running"):
+                err = state.get("error") or f"无法连接 {url}"
+                self.after(0, lambda: messagebox.showerror("Ollama 未就绪", f"{err}\n请确认 Ollama 已启动或使用带内置 Ollama 版本。"))
+                return
             try:
                 models = list_ollama_models(url)
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("Ollama 连接失败", f"无法连接 {url}：\n{exc}\n请确认 Ollama 已运行。"))
+                self.after(0, lambda: messagebox.showerror("Ollama 连接失败", f"无法连接 {url}：\n{exc}"))
                 return
 
             def _done():
@@ -1580,12 +1608,70 @@ class BilingualSubStudioApp(tk.Tk):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _import_local_ggufs_async(self) -> None:
+        if self._is_busy:
+            messagebox.showwarning("提示", "已有任务正在运行中，请先等待完成或点击停止。")
+            return
+        url = self.var_ollama_url.get().strip() or "http://127.0.0.1:11434"
+        drop_dir = get_llm_drop_dir()
+        drop_dir.mkdir(parents=True, exist_ok=True)
+        self.btn_import_gguf.configure(state=tk.DISABLED)
+        self._append_log(self.txt_trans_log, f"[模型导入] 正在扫描 {drop_dir} ...")
+
+        def _worker():
+            res = scan_and_import_local_ggufs(
+                url,
+                log_cb=lambda m: self.after(0, lambda msg=m: self._append_log(self.txt_trans_log, msg)),
+            )
+            models: list[str] = []
+            try:
+                models = list_ollama_models(url)
+            except Exception:
+                pass
+
+            def _done():
+                self.btn_import_gguf.configure(state=tk.NORMAL)
+                if models:
+                    self.cmb_ollama_model["values"] = models
+                imported = res.get("imported", [])
+                skipped = res.get("skipped", [])
+                failed = res.get("failed", [])
+                if imported:
+                    self.var_ollama_model.set(imported[0])
+                    self._save_trans_cfg_from_ui(show_tip=False)
+                self._probe_hardware_async()
+
+                if not imported and not skipped and not failed:
+                    messagebox.showinfo(
+                        "未发现 GGUF 模型",
+                        f"在 models/llm/ 目录中暂未发现 .gguf 文件。\n\n请先按「把下载好的GGUF模型放这里.txt」里的直链下载模型放到：\n{drop_dir}\n然后再点本按钮导入。",
+                    )
+                else:
+                    lines = [
+                        f"新导入：{len(imported)} 个" + (f"（{', '.join(imported)}）" if imported else ""),
+                        f"已存在跳过：{len(skipped)} 个",
+                    ]
+                    if failed:
+                        lines.append(f"失败：{len(failed)} 个 -> {failed[0][0]}: {failed[0][1]}")
+                    messagebox.showinfo("扫描导入结果", "\n".join(lines))
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _test_translator_async(self) -> None:
         cfg = self._save_trans_cfg_from_ui(show_tip=False)
         self.btn_test_trans.configure(state=tk.DISABLED)
         self._append_log(self.txt_trans_log, f"[连通测试] 正在尝试连接 {cfg.provider} 并试翻 1 句农村方言...")
 
         def _worker():
+            if cfg.provider == "ollama":
+                state = ensure_ollama_running(cfg.ollama_url)
+                if state.get("running"):
+                    scan_and_import_local_ggufs(
+                        cfg.ollama_url,
+                        log_cb=lambda m: self.after(0, lambda msg=m: self._append_log(self.txt_trans_log, msg)),
+                    )
             ok, msg = test_translator_connection(cfg)
 
             def _done():
@@ -1740,6 +1826,11 @@ class BilingualSubStudioApp(tk.Tk):
 
                 self.after(0, _upd)
 
+            if cfg.provider == "ollama":
+                state = ensure_ollama_running(cfg.ollama_url)
+                if state.get("running"):
+                    scan_and_import_local_ggufs(cfg.ollama_url, log_cb=log)
+
             res = translate_batch(
                 zh_dir,
                 en_dir,
@@ -1862,6 +1953,11 @@ class BilingualSubStudioApp(tk.Tk):
 
             def _log2(m: str):
                 self.after(0, lambda msg=m: self._append_log(self.txt_trans_log, msg))
+
+            if trans_cfg.provider == "ollama":
+                state = ensure_ollama_running(trans_cfg.ollama_url)
+                if state.get("running"):
+                    scan_and_import_local_ggufs(trans_cfg.ollama_url, log_cb=_log2)
 
             def _prog2(cur_idx: int, total: int, cur_pct: float, msg: str):
                 tot_pct = (((max(1, cur_idx) - 1) + (cur_pct / 100.0)) / max(1, total)) * 100.0
@@ -2469,6 +2565,7 @@ class BilingualSubStudioApp(tk.Tk):
         self.btn_run_extract.configure(state=state_run)
         self.btn_run_translate.configure(state=state_run)
         self.btn_test_trans.configure(state=state_run)
+        self.btn_import_gguf.configure(state=state_run)
         self.btn_run_burn.configure(state=state_run)
         self.btn_test_burn.configure(state=state_run)
 
@@ -2496,4 +2593,5 @@ class BilingualSubStudioApp(tk.Tk):
             self._cancel_event.set()
         if self._ext_cap:
             self._ext_cap.release()
+        stop_embedded_ollama()
         self.destroy()

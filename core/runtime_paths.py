@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 DEFAULT_PRESETS: dict[str, dict] = {
     "横屏常规底部 (16:9)": {
@@ -116,6 +117,27 @@ def get_models_dir() -> Path:
         if p.exists():
             return p
     return candidates[0]
+
+
+def get_llm_drop_dir() -> Path:
+    """获取用户存放自定义本地 GGUF 翻译模型的目录（绿色包根目录 models/llm）。"""
+    return get_app_dir() / "models" / "llm"
+
+
+def get_embedded_ollama_dir() -> Path:
+    """获取绿色包内置 Ollama 运行时目录（runtime/ollama）。"""
+    return get_app_dir() / "runtime" / "ollama"
+
+
+def get_embedded_ollama_exe() -> Optional[Path]:
+    """若绿色包自带了 runtime/ollama/ollama.exe 则返回其路径，否则返回 None。"""
+    exe = get_embedded_ollama_dir() / "ollama.exe"
+    return exe if exe.is_file() else None
+
+
+def get_embedded_ollama_models_dir() -> Path:
+    """获取内置 Ollama 专用模型库存储目录（runtime/ollama_models），实现整包完全绿色隔离。"""
+    return get_app_dir() / "runtime" / "ollama_models"
 
 
 def get_ffmpeg_exe() -> str:
