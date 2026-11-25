@@ -204,7 +204,8 @@ def infer_model_tag_and_modelfile(gguf_path: Path) -> tuple[str, str]:
     quant_match = re.search(r"[-.](IQ\d+_[A-Z0-9_]+|Q\d+_[A-Z0-9_]+|Q8_0|F16|BF16)$", stem, re.IGNORECASE)
     quant_tag = quant_match.group(1).lower() if quant_match else "latest"
     base_clean = stem[: quant_match.start()] if quant_match else stem
-    norm_base = re.sub(r"[^a-z0-9]+", "-", base_clean.lower()).strip("-") or "local-llm"
+    norm_base = re.sub(r"[^a-z0-9.]+", "-", base_clean.lower())
+    norm_base = re.sub(r"-{2,}", "-", norm_base).strip(".-") or "local-llm"
 
     if "index-translate" in low:
         if "q4_k_m" in low:
