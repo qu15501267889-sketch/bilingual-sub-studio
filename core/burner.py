@@ -4,7 +4,7 @@ import re
 import subprocess
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -65,7 +65,7 @@ AUTO_PLACE_CHOICES: list[tuple[str, str]] = [
     ("auto", "自动防重叠（优先下方，太低放上方）[推荐]"),
     ("always_above", "自动紧贴原中文字幕上方"),
     ("always_below", "自动紧贴原中文字幕下方"),
-    ("manual", "手动固定距底高度（按下方滑块）"),
+    ("manual", "手动自由定位 (X, Y 滑块 / 左图拖拽)"),
 ]
 
 SPEED_FACTOR = 1.025
@@ -80,8 +80,8 @@ class BurnCancelled(Exception):
 
 @dataclass
 class BurnStyleConfig:
-    """所见即所得双语字幕排版样式配置。"""
-    margin_v_ratio: float = 0.052      # 手动模式下主英文字幕距底边高度比（0.01 ~ 0.40）
+    """所见即所得双语字幕排版样式配置（支持主字幕与单条花字自由 X/Y 定位）。"""
+    margin_v_ratio: float = 0.052      # 手动模式下距底边高度比（兼容字段，与 pos_y_ratio 联动）
     font_size_ratio: float = 0.036     # 主英文字幕字号比（0.018 ~ 0.070）
     font_color_name: str = "暖白"
     outline_width: float = 3.0         # 描边粗细
@@ -89,9 +89,12 @@ class BurnStyleConfig:
     note_scale_mult: float = 1.0       # 花字英文字号倍率（0.6 ~ 1.5）
     note_gap_px: int = 8               # 花字英文与原中文的上下间距（px）
     top_banner_text: str = "90s Rural China · Official"
-    auto_zoom_margin_comp: bool = True  # 手动模式下开启 micro_zoom 时自动微补偿下移
+    auto_zoom_margin_comp: bool = True  # 回退高度开启 micro_zoom 时自动微补偿下移
     auto_place_mode: str = "auto"      # "auto" | "always_above" | "always_below" | "manual"
     auto_gap_ratio: float = 0.012      # 自动排版时英文与原中文字幕之间的安全间距比例（默认 1.2%）
+    pos_x_ratio: float = 0.50          # 主英文字幕水平中心 X（0.10 ~ 0.90，所有模式均可横移）
+    pos_y_ratio: float = 0.948         # 手动自由定位下主英文字幕底边 Y（0.08 ~ 0.985）
+    note_pos_overrides: dict[str, list[float]] = field(default_factory=dict)  # 单条花字手动位置 {"1": [cx, cy]}
 
 
 def detect_best_encoder() -> str:
@@ -280,6 +283,13 @@ def compute_effective_main_layout(
     f_ratio = style.font_size_ratio * (0.90 if is_blur_frame else 1.0)
     fontsize = max(18, int(round(h * f_ratio)))
 
+    pos_x_ratio = max(0.10, min(0.90, float(style.pos_x_ratio)))
+    px = int(round(w * pos_x_ratio))
+    safe_side_pad = max(16, int(round(w * 0.03)))
+    margin_lr = int(round(w * 0.05))
+    sym_half = max(90, min(px - safe_side_pad, w - safe_side_pad - px))
+    max_line_w = float(min(w - 2 * margin_lr, 2 * sym_half))
+
     placement = "manual"
     zy0: Optional[float] = None
     zy1: Optional[float] = None
@@ -302,23 +312,39 @@ def compute_effective_main_layout(
 
         if placement == "above":
             m_ratio = max(0.020, min(0.60, 1.0 - (zy0 - gap)))
-            reason = f"原中文(缩放后) {zy0*100:.1f}%~{zy1*100:.1f}%(底空{bottom_space*100:.1f}%) → 自动放原字幕上方(距底{m_ratio*100:.1f}%)"
+            pos_y_ratio = max(0.08, min(0.985, 1.0 - m_ratio))
+            reason = f"原中文(缩放后) {zy0*100:.1f}%~{zy1*100:.1f}%(底空{bottom_space*100:.1f}%) → 自动放原字幕上方(Y={pos_y_ratio*100:.1f}%)"
         else:
             m_ratio = max(min_bottom_pad, min(0.50, 1.0 - (zy1 + gap + en_h_1line)))
-            reason = f"原中文(缩放后) {zy0*100:.1f}%~{zy1*100:.1f}%(底空{bottom_space*100:.1f}%) → 自动放原字幕下方(距底{m_ratio*100:.1f}%)"
+            pos_y_ratio = max(0.08, min(0.985, 1.0 - m_ratio))
+            reason = f"原中文(缩放后) {zy0*100:.1f}%~{zy1*100:.1f}%(底空{bottom_space*100:.1f}%) → 自动放原字幕下方(Y={pos_y_ratio*100:.1f}%)"
+        if abs(pos_x_ratio - 0.50) > 0.003:
+            reason += f" [X={pos_x_ratio*100:.1f}%]"
         main_zone_top_px = int(round(h * min(zy0, 1.0 - m_ratio - en_h_1line)))
     else:
-        if is_blur_frame:
-            m_ratio = min(0.024, style.margin_v_ratio)
-        elif is_zoom and style.auto_zoom_margin_comp:
-            m_ratio = max(0.010, style.margin_v_ratio - 0.008)
+        raw_y = float(style.pos_y_ratio)
+        raw_mv = float(style.margin_v_ratio)
+        if style.auto_place_mode == "manual":
+            # 自由定位模式优先读取 pos_y_ratio（若仅改了旧字段 margin_v_ratio 则自动换算兼容）
+            if abs(raw_y - 0.948) > 1e-4 or abs(raw_mv - 0.052) <= 1e-4:
+                pos_y_ratio = max(0.08, min(0.985, raw_y))
+            else:
+                pos_y_ratio = max(0.08, min(0.985, 1.0 - raw_mv))
+            m_ratio = 1.0 - pos_y_ratio
+            reason = f"手动自由定位 X={pos_x_ratio*100:.1f}%, Y={pos_y_ratio*100:.1f}%"
         else:
-            m_ratio = style.margin_v_ratio
-        reason = "手动固定高度模式" if style.auto_place_mode == "manual" else "未检出原中文字幕，回退手动高度"
-        main_zone_top_px = int(round(h * 0.81))
+            if is_blur_frame:
+                m_ratio = min(0.024, raw_mv)
+            elif is_zoom and style.auto_zoom_margin_comp:
+                m_ratio = max(0.010, raw_mv - 0.008)
+            else:
+                m_ratio = raw_mv
+            pos_y_ratio = max(0.08, min(0.985, 1.0 - m_ratio))
+            reason = "未检出原中文字幕，回退默认高度"
+        main_zone_top_px = int(round(h * max(0.02, pos_y_ratio - en_h_1line * 1.4)))
 
-    margin_v = int(round(h * m_ratio))
-    margin_lr = int(round(w * 0.05))
+    py = int(round(h * pos_y_ratio))
+    margin_v = max(0, h - py)
     ass_color, rgb_color = COLOR_PRESETS.get(style.font_color_name, COLOR_PRESETS["暖白"])
     outline_px = max(1.0, float(style.outline_width))
 
@@ -327,6 +353,11 @@ def compute_effective_main_layout(
         "margin_v": margin_v,
         "margin_v_ratio": m_ratio,
         "margin_lr": margin_lr,
+        "px": px,
+        "py": py,
+        "pos_x_ratio": pos_x_ratio,
+        "pos_y_ratio": pos_y_ratio,
+        "max_line_w": max_line_w,
         "ass_color": ass_color,
         "rgb_color": rgb_color,
         "outline_px": outline_px,
@@ -349,7 +380,7 @@ def compute_note_layout(
     has_main_overlap: bool,
     main_zone_top_px: Optional[int] = None,
 ) -> dict:
-    """预览与 ASS 共用同一套花字定位与防出画计算公式。"""
+    """预览与 ASS 共用同一套花字定位与防出画计算公式（支持单条花字手动坐标覆写）。"""
     is_blur_frame = bool(opts.get("blur_frame"))
     total_scale = (
         (1.03 if opts.get("micro_zoom") else 1.0)
@@ -374,6 +405,27 @@ def compute_note_layout(
         est_w = _estimate_text_width(clean_en, note_fs)
 
     half_w = est_w / 2.0
+    note_idx = int(pos_info.get("index", 0) or 0)
+    override = (style.note_pos_overrides or {}).get(str(note_idx))
+
+    if isinstance(override, (list, tuple)) and len(override) >= 2:
+        ov_x = max(0.05, min(0.95, float(override[0])))
+        ov_y = max(0.04, min(0.96, float(override[1])))
+        px = int(round(max(margin_x + half_w, min(w - margin_x - half_w, w * ov_x))))
+        py = int(round(max(note_fs * 0.6 + 12, min(h - note_fs * 0.6 - 12, h * ov_y))))
+        align = 5
+        return {
+            "index": note_idx,
+            "align": align,
+            "px": px,
+            "py": py,
+            "note_fs": note_fs,
+            "text": clean_en,
+            "is_manual": True,
+            "nx_ratio": round(px / max(1, w), 4),
+            "ny_ratio": round(py / max(1, h), 4),
+        }
+
     px = int(round(max(margin_x + half_w, min(w - margin_x - half_w, cx_p))))
 
     gap = int(style.note_gap_px)
@@ -385,22 +437,73 @@ def compute_note_layout(
     if hits_bottom_edge or hits_main_zone:
         align = 2
         py = int(round(max(note_fs + 16, y0_p - gap)))
+        center_y = py - note_fs * 0.5
     else:
         align = 8
         py = py_below
+        center_y = py + note_fs * 0.5
 
-    return {"align": align, "px": px, "py": py, "note_fs": note_fs, "text": clean_en}
+    return {
+        "index": note_idx,
+        "align": align,
+        "px": px,
+        "py": py,
+        "note_fs": note_fs,
+        "text": clean_en,
+        "is_manual": False,
+        "nx_ratio": round(px / max(1, w), 4),
+        "ny_ratio": round(max(0.04, min(0.96, center_y / max(1, h))), 4),
+    }
+
+
+def _fit_en_text_for_width(text: str, base_fs: int, max_line_w: float, allow_wrap: bool = True) -> tuple[str, int]:
+    """根据当前水平位置的最大对称行宽自适应缩窄字号与智能折行，防止拖偏左右时文字出画截断。"""
+    clean = text.strip()
+    if not clean:
+        return "", base_fs
+    norm = clean.replace("\n", r"\N")
+    if r"\N" in norm:
+        max_w = max((_estimate_text_width(seg.strip(), base_fs) for seg in norm.split(r"\N")), default=0.0)
+        if max_w > max_line_w > 0:
+            fit_fs = max(18, int(round(base_fs * 0.68)), int(base_fs * (max_line_w * 0.94 / max_w)))
+            return norm, fit_fs
+        return norm, base_fs
+
+    est_w = _estimate_text_width(norm, base_fs)
+    if est_w <= max_line_w or est_w <= 0:
+        return norm, base_fs
+
+    min_fs = max(18, int(round(base_fs * 0.72)))
+    fit_fs = max(min_fs, int(base_fs * (max_line_w * 0.94 / est_w)))
+    if _estimate_text_width(norm, fit_fs) <= max_line_w or (not allow_wrap):
+        return norm, fit_fs
+
+    # 拖到画面靠左/靠右较窄区域时按英文空格均匀断行
+    words = norm.split()
+    if len(words) < 2:
+        return norm, max(16, int(base_fs * (max_line_w * 0.92 / est_w)))
+
+    lines_out: list[str] = []
+    cur = words[0]
+    for wd in words[1:]:
+        cand = f"{cur} {wd}"
+        if _estimate_text_width(cand, min_fs) <= max_line_w * 0.96:
+            cur = cand
+        else:
+            lines_out.append(cur)
+            cur = wd
+    lines_out.append(cur)
+    wrapped = r"\N".join(lines_out)
+    max_w = max((_estimate_text_width(seg, min_fs) for seg in lines_out), default=0.0)
+    if max_w > max_line_w > 0:
+        min_fs = max(16, int(min_fs * (max_line_w * 0.94 / max_w)))
+    return wrapped, min_fs
 
 
 def _fit_below_line_fontsize(text: str, base_fs: int, w: int, margin_lr: int) -> int:
-    """英文位于原中文字幕下方时，对单行偏长句子自动轻微缩窄字号防止折行往上顶撞中文。"""
-    if r"\N" in text or "\n" in text:
-        return base_fs
-    max_line_w = max(100.0, (w - 2 * margin_lr) * 0.96)
-    est_w = _estimate_text_width(text, base_fs)
-    if est_w <= max_line_w or est_w <= 0:
-        return base_fs
-    return max(18, int(round(base_fs * 0.72)), int(base_fs * (max_line_w * 0.94 / est_w)))
+    """兼容辅助函数：计算常规居中下方单行自适应字号。"""
+    _, fs = _fit_en_text_for_width(text, base_fs, max(100.0, (w - 2 * margin_lr) * 0.96), allow_wrap=False)
+    return fs
 
 
 # ==================== 所见即所得实时预览绘制 ====================
@@ -419,15 +522,15 @@ def _load_preview_font(size_px: int) -> ImageFont.FreeTypeFont | ImageFont.Image
     return ImageFont.load_default()
 
 
-def render_burn_preview_pil(
+def render_burn_preview_with_meta(
     frame_bgr: np.ndarray,
     style: BurnStyleConfig,
     opts: dict[str, bool],
     sample_en_text: str = "The first Dave Jianguo Award goes to Dave Jianguo!",
     sample_note: Optional[dict] = None,
     zh_band: Optional[tuple[float, float]] = None,
-) -> Image.Image:
-    """在内存帧上所见即所得绘制模拟缩放/画框与双语英文字幕，返回 PIL RGB Image。"""
+) -> tuple[Image.Image, dict]:
+    """在内存帧上所见即所得绘制双语英文字幕与花字，并返回拖拽锚点/边界框元数据。"""
     h, w = frame_bgr.shape[:2]
     work = frame_bgr.copy()
 
@@ -457,41 +560,57 @@ def render_burn_preview_pil(
 
     layout = compute_effective_main_layout(w, h, style, opts, zh_band=zh_band)
     fs = layout["fontsize"]
-    margin_v = layout["margin_v"]
+    px = layout["px"]
+    py = layout["py"]
     rgb_color = layout["rgb_color"]
     stroke_w = max(1, int(round(layout["outline_px"])))
 
-    # 绘制主英文字幕
+    main_box: Optional[tuple[float, float, float, float]] = None
+    main_anchor = (layout["pos_x_ratio"], layout["pos_y_ratio"])
+
+    # 绘制主英文字幕（锚点为主字幕底边中心 (px, py)）
     if sample_en_text.strip():
-        fs_eff = _fit_below_line_fontsize(sample_en_text, fs, w, layout["margin_lr"]) if layout["placement"] == "below" else fs
+        allow_wrap = layout["placement"] != "below"
+        fit_ass, fs_eff = _fit_en_text_for_width(sample_en_text, fs, layout["max_line_w"], allow_wrap=allow_wrap)
         font = _load_preview_font(fs_eff)
-        text = sample_en_text.replace(r"\N", "\n").strip()
-        bbox = draw.multiline_textbbox((w // 2, 0), text, font=font, anchor="ma", align="center")
-        text_w = bbox[2] - bbox[0]
+        text = fit_ass.replace(r"\N", "\n").strip()
+        bbox = draw.multiline_textbbox((px, 0), text, font=font, anchor="ma", align="center")
         text_h = bbox[3] - bbox[1]
-        y_top = h - margin_v - text_h
+        y_top = py - text_h - bbox[1]
+        draw_y = py - bbox[3]
+
+        bx0 = max(0, bbox[0] - 8)
+        bx1 = min(w, bbox[2] + 8)
+        by0 = max(0, (py - text_h) - 6)
+        by1 = min(h, py + 6)
+        main_box = (bx0 / max(1, w), by0 / max(1, h), bx1 / max(1, w), by1 / max(1, h))
 
         if style.use_semi_bg_box and not layout["is_blur_frame"]:
             pad_x = max(12, int(fs_eff * 0.35))
             pad_y = max(6, int(fs_eff * 0.18))
             draw.rounded_rectangle(
-                [w // 2 - text_w // 2 - pad_x, y_top - pad_y, w // 2 + text_w // 2 + pad_x, y_top + text_h + pad_y],
+                [bbox[0] - pad_x, (py - text_h) - pad_y, bbox[2] + pad_x, py + pad_y],
                 radius=8,
                 fill=(0, 0, 0, 160),
             )
             draw.multiline_text(
-                (w // 2, y_top), text, font=font, anchor="ma", align="center",
+                (px, draw_y), text, font=font, anchor="ma", align="center",
                 fill=(*rgb_color, 255),
             )
         else:
             draw.multiline_text(
-                (w // 2, y_top), text, font=font, anchor="ma", align="center",
+                (px, draw_y), text, font=font, anchor="ma", align="center",
                 fill=(*rgb_color, 255),
                 stroke_width=stroke_w,
                 stroke_fill=(0, 0, 0, 255),
             )
 
-    # 若当前帧有对应花字注释，同时画出花字位置预览
+    note_box: Optional[tuple[float, float, float, float]] = None
+    note_anchor: Optional[tuple[float, float]] = None
+    note_index: Optional[int] = None
+    note_layout_meta: Optional[dict] = None
+
+    # 若当前帧有对应花字注释，同时画出花字位置预览并记录可拖拽包围盒
     if sample_note and sample_note.get("pos_info") and sample_note.get("text_en"):
         nl = compute_note_layout(
             sample_note["pos_info"],
@@ -501,7 +620,7 @@ def render_burn_preview_pil(
             main_zone_top_px=layout["main_zone_top_px"],
         )
         n_font = _load_preview_font(nl["note_fs"])
-        anchor = "ma" if nl["align"] == 8 else "mb"
+        anchor = "mm" if nl["align"] == 5 else ("ma" if nl["align"] == 8 else "mb")
         draw.text(
             (nl["px"], nl["py"]),
             nl["text"],
@@ -511,6 +630,16 @@ def render_burn_preview_pil(
             stroke_width=max(2, stroke_w),
             stroke_fill=(0, 0, 0, 255),
         )
+        nb = draw.textbbox((nl["px"], nl["py"]), nl["text"], font=n_font, anchor=anchor)
+        note_box = (
+            max(0, nb[0] - 8) / max(1, w),
+            max(0, nb[1] - 6) / max(1, h),
+            min(w, nb[2] + 8) / max(1, w),
+            min(h, nb[3] + 6) / max(1, h),
+        )
+        note_anchor = (nl["nx_ratio"], nl["ny_ratio"])
+        note_index = nl["index"]
+        note_layout_meta = nl
 
     # 若启用画框模式，画顶部官方标语
     if layout["is_blur_frame"] and style.top_banner_text.strip():
@@ -527,7 +656,37 @@ def render_burn_preview_pil(
             stroke_fill=(0, 0, 0, 255),
         )
 
-    return Image.alpha_composite(img, overlay).convert("RGB")
+    out_img = Image.alpha_composite(img, overlay).convert("RGB")
+    meta = {
+        "layout": layout,
+        "main_box": main_box,
+        "main_anchor": main_anchor,
+        "note_box": note_box,
+        "note_anchor": note_anchor,
+        "note_index": note_index,
+        "note_layout": note_layout_meta,
+    }
+    return out_img, meta
+
+
+def render_burn_preview_pil(
+    frame_bgr: np.ndarray,
+    style: BurnStyleConfig,
+    opts: dict[str, bool],
+    sample_en_text: str = "The first Dave Jianguo Award goes to Dave Jianguo!",
+    sample_note: Optional[dict] = None,
+    zh_band: Optional[tuple[float, float]] = None,
+) -> Image.Image:
+    """兼容原有调用：返回所见即所得 PIL RGB Image。"""
+    img, _ = render_burn_preview_with_meta(
+        frame_bgr,
+        style,
+        opts,
+        sample_en_text=sample_en_text,
+        sample_note=sample_note,
+        zh_band=zh_band,
+    )
+    return img
 
 
 # ==================== ASS 生成与 FFmpeg 烧录 ====================
@@ -548,8 +707,12 @@ def build_bilingual_ass(
     fontsize = layout["fontsize"]
     margin_v = layout["margin_v"]
     margin_lr = layout["margin_lr"]
+    px = layout["px"]
+    py = layout["py"]
+    max_line_w = layout["max_line_w"]
     ass_color = layout["ass_color"]
     is_blur_frame = layout["is_blur_frame"]
+    use_pos_tag = (style.auto_place_mode == "manual") or (abs(layout["pos_x_ratio"] - 0.50) > 0.002)
 
     banner_size = max(18, int(round(h * 0.026)))
     banner_margin_v = int(round(h * 0.018))
@@ -589,13 +752,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         end_h = int(duration // 3600) + 1
         lines.append(f"Dialogue: 0,0:00:00.00,{end_h}:00:00.00,TopBanner,,0,0,0,,{style.top_banner_text.strip()}\n")
 
+    allow_wrap = layout["placement"] != "below"
     for ev in main_events:
-        ev_txt = ev["text"]
-        if layout["placement"] == "below":
-            fit_fs = _fit_below_line_fontsize(ev_txt, fontsize, w, margin_lr)
-            if fit_fs < fontsize:
-                ev_txt = f"{{\\fs{fit_fs}}}{ev_txt}"
-        lines.append(f"Dialogue: 0,{ev['start_ass']},{ev['end_ass']},EnSub,,0,0,0,,{ev_txt}\n")
+        ev_txt, fit_fs = _fit_en_text_for_width(ev["text"], fontsize, max_line_w, allow_wrap=allow_wrap)
+        tags: list[str] = []
+        if use_pos_tag:
+            tags.append(rf"\an2\pos({px},{py})")
+        if fit_fs != fontsize:
+            tags.append(rf"\fs{fit_fs}")
+        prefix = "{" + "".join(tags) + "}" if tags else ""
+        lines.append(f"Dialogue: 0,{ev['start_ass']},{ev['end_ass']},EnSub,,0,0,0,,{prefix}{ev_txt}\n")
 
     if note_events and pos_items:
         pos_by_idx = {int(item["index"]): item for item in pos_items}
@@ -793,6 +959,8 @@ def burn_video(
         )
         if style_cfg.auto_place_mode != "manual":
             log(f"[自动防撞排版] {video_path.name} | {layout['reason']}")
+        else:
+            log(f"[手动自由定位] {video_path.name} | {layout['reason']}")
 
         pre_filters: list[str] = []
         if opts.get("micro_zoom"):

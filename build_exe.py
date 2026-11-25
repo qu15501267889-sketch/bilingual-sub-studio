@@ -34,19 +34,19 @@ def _resolve_ffmpeg_binary(name: str) -> Path:
         f"将其加入系统 PATH，或使用 winget 安装 Gyan.FFmpeg。"
     )
 
-README_TEXT = """==================== 双语字幕工坊 V1.3（绿色免安装版）====================
+README_TEXT = """==================== 双语字幕工坊 V1.5（绿色免安装版）====================
 
 【核心升级与特点】
 1. 整套文件夹直接拷贝到任何 Windows 10/11 电脑即可使用（无需安装 Python、无需配置 FFmpeg 环境变量、无需 N 卡 CUDA）。
-2. 全新升级离线 PP-OCRv5 高精度模型（V1.3 重磅）：内置 ch_PP-OCRv5_rec_server.onnx 高精度核心识别模型，专门大幅降低综艺/手写/发光等花哨字体的错别字率，同时提供极速版可选，全程离线支持 AMD/NVIDIA DirectML 显卡加速。
-3. 全自动防重叠排版：第 2 步烧录时自动检测原中文字幕真实高度并结合去重缩放变化——原字幕底部留白充足就放正下方，原字幕太低贴底就自动放正上方！
-4. 全视频逐集独立选区：批量文件夹有多少个视频就列多少条！支持「提取前自动识别未定制视频红框」，也可点击清单任意视频拖拽专属红/蓝框（自动记忆在 _video_rois.json）。
-5. 成品原子防损坏与完整日志：烧录过程写入 .building.mp4 临时文件完成后再原子改名（杜绝未完成残片导致播放器提示无效），统一输出标准 SAR 1:1，并自动保存 _extract_log.txt 与 _burn_log.txt。
+2. 一键全自动一条龙（V1.5 重磅）：选好原视频文件夹后点击顶部「一键全自动一条龙」，自动串行执行「PP-OCRv5 提取 -> 内置 AI 方言翻校 -> 释放显存 -> 自动防重叠与去重烧录」。
+3. 双引擎 AI 自动翻译 + 保留手动流程：默认对接外置本机 Ollama（推荐 B 站专用模型 hf.co/IndexTeam/Index-Translate-9B-GGUF:Q4_K_M，兼容腾讯 Hy-MT 及云端 OpenAI 兼容 API），译表支持双击秒改；第 1/2 页仍完整保留「手动复制 Agent 提示词」按钮。
+4. 主字幕与单条花字自由 (X, Y) 拖拽：第 3 页支持水平 X 与垂直 Y 滑块调节，或直接按住左图预览画面中的主英文字幕 / 当前帧花字拖到任意位置（逐集独立记忆）。
+5. 全新离线 PP-OCRv5 高精度模型 + DirectML 显卡加速 + 原子防损坏 .building.mp4 写入与 SAR 1:1 规范，自动保存 _extract_log.txt、_translate_log.txt 与 _burn_log.txt。
 
 【使用步骤】
 1. 双击运行本目录下的「双语字幕工坊.exe」。
-2. 第 1 步（提取）：选择原视频文件夹（默认使用 PP-OCRv5 高精度模型 + DirectML 显卡加速），点击「一键批量提取中文 SRT」。提取完成后自动弹出《给 Agent 提示词》，一键复制发给 WorkBuddy 批量翻译。
-3. 第 2 步（烧录）：把翻译好的同名英文 SRT 放入英文文件夹，在软件第 2 页点「扫描匹配状态」，默认开启「自动防重叠（优先下方，太低放上方）」，直接点「一键批量烧录全部」即可出片。
+2. 一条龙用法：选择原视频文件夹后确认本机 Ollama 已运行或填写云端 API，点击「一键全自动一条龙」即可自动出片（也可分第 1/2/3 步逐步调整）。
+3. 传统手动用法：第 1 步提取中文后点「手动复制 Agent 提示词」交给外部 Agent 翻译，再回第 3 步匹配烧录。
 
 【注意】
 请勿移动或删除同目录下的 _internal、bin、models 和 config 文件夹，否则程序将无法正常运行。
@@ -76,7 +76,7 @@ def main() -> None:
         str(PROJECT_DIR / "main.py"),
     ]
 
-    print("=== 开始 PyInstaller V1.3 绿色打包 ===")
+    print("=== 开始 PyInstaller V1.5 绿色打包 ===")
     subprocess.run(cmd, cwd=str(PROJECT_DIR), check=True)
 
     dist_dir = PROJECT_DIR / "dist" / APP_NAME
@@ -103,12 +103,13 @@ def main() -> None:
 
     (dist_dir / "使用说明.txt").write_text(README_TEXT, encoding="utf-8")
 
-    # 预置多地方言词典与选区预设模板到绿色包 config 目录
-    from core.runtime_paths import DEFAULT_GLOSSARY, DEFAULT_PRESETS
+    # 预置多地方言词典、选区预设模板与默认翻译配置到绿色包 config 目录（不含任何私钥）
+    from core.runtime_paths import DEFAULT_GLOSSARY, DEFAULT_PRESETS, DEFAULT_TRANSLATOR_CONFIG
     cfg_dir = dist_dir / "config"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     (cfg_dir / "presets.json").write_text(json.dumps(DEFAULT_PRESETS, ensure_ascii=False, indent=2), encoding="utf-8")
     (cfg_dir / "glossary.txt").write_text(DEFAULT_GLOSSARY.strip() + "\n", encoding="utf-8")
+    (cfg_dir / "translator.json").write_text(json.dumps(DEFAULT_TRANSLATOR_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # 检查是否已带上 DirectML.dll（若缺失则从 site-packages 补拷贝）
     import onnxruntime

@@ -81,6 +81,20 @@ DEFAULT_GLOSSARY = """【90年代北方农村 & 剧情专属】
 - 苕 / 信球 = dummy / dork / dimwit
 - 恰饭 = grab a bite / eat"""
 
+DEFAULT_TRANSLATOR_CONFIG: dict = {
+    "provider": "ollama",
+    "ollama_url": "http://127.0.0.1:11434",
+    "ollama_model": "hf.co/IndexTeam/Index-Translate-9B-GGUF:Q4_K_M",
+    "api_base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "api_model": "deepseek-chat",
+    "batch_size": 12,
+    "temperature": 0.1,
+    "skip_existing": True,
+    "unload_after_done": True,
+    "auto_detect_dialect": True,
+}
+
 _LEGACY_GLOSSARY_PREFIX = "- 戴建国 = Dave Jianguo（或 Dave）"
 
 
@@ -203,3 +217,27 @@ def load_glossary() -> str:
 def save_glossary(text: str) -> None:
     p = get_config_dir() / "glossary.txt"
     p.write_text(text.strip() + "\n", encoding="utf-8")
+
+
+def load_translator_config() -> dict:
+    """读取本地 AI 自动翻译配置（Ollama / 云端 OpenAI 兼容 API），缺失字段自动补齐默认值。"""
+    p = get_config_dir() / "translator.json"
+    cfg = dict(DEFAULT_TRANSLATOR_CONFIG)
+    if not p.exists():
+        return cfg
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            for k in DEFAULT_TRANSLATOR_CONFIG:
+                if k in raw:
+                    cfg[k] = raw[k]
+    except Exception:
+        pass
+    return cfg
+
+
+def save_translator_config(cfg: dict) -> None:
+    """将翻译引擎配置保存至 config/translator.json。"""
+    p = get_config_dir() / "translator.json"
+    data = {k: cfg.get(k, v) for k, v in DEFAULT_TRANSLATOR_CONFIG.items()}
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -15,13 +15,15 @@ models/ppocr_v5/*.onnx
 models/*.onnx
 bin/
 
-# 本地运行日志、测试视频与环境变量
+# 本地运行日志、测试视频与密钥配置
 *.mp4
 *.mov
 *.mkv
 *.log
 _extract_log.txt
+_translate_log.txt
 _burn_log.txt
+config/translator.json
 .env
 .DS_Store
 Thumbs.db
