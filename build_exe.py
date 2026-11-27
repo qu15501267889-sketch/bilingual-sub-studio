@@ -10,8 +10,8 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent
 APP_NAME = "双语字幕工坊"
 DESKTOP_RELEASE_DIR = Path.home() / "Desktop" / "双语字幕工坊_绿色免安装版"
-LITE_DIST_NAME = "双语字幕工坊_V1.5.1_标准轻量版"
-WITH_OLLAMA_DIST_NAME = "双语字幕工坊_V1.5.1_内置Ollama全能版"
+LITE_DIST_NAME = "双语字幕工坊_V1.5.2_标准轻量版"
+WITH_OLLAMA_DIST_NAME = "双语字幕工坊_V1.5.2_内置Ollama全能版"
 
 
 def _resolve_ffmpeg_binary(name: str) -> Path:
@@ -108,24 +108,26 @@ MODEL_LINKS_GUIDE = """
 """
 
 README_LITE_TEXT = (
-    "==================== 双语字幕工坊 V1.5.1（标准轻量版 · 无内置 Ollama）====================\n\n"
+    "==================== 双语字幕工坊 V1.5.2（标准轻量版 · 无内置 Ollama）====================\n\n"
     "【版本说明】\n"
-    "1. 本版本体积轻巧（约 406 MB），已完整内置 FFmpeg/FFprobe、PP-OCRv5 离线模型（支持 AMD/NVIDIA DirectML 显卡加速）、自由(X,Y)拖拽排版引擎与防重叠烧录全功能。\n"
+    "1. 本版本体积轻巧（约 406 MB），已完整内置 FFmpeg/FFprobe、PP-OCRv5 离线模型（支持 AMD/NVIDIA DirectML 显卡加速）、自由(X,Y)拖拽排版引擎与 V1.5.2 无损多维防查重引擎。\n"
     "2. 本包【不含】Ollama 运行时本体：若需使用 AI 一键自动翻译，请在本机另行安装 Ollama（或使用第 2 页云端 OpenAI 兼容 API），或者直接使用第 1/2 页保留的「手动复制 Agent 提示词」。\n"
-    "3. 如果电脑尚未安装 Ollama 且不想折腾配置，请到发布页下载【内置 Ollama 全能版】。\n"
+    "3. V1.5.2 防查重支持 4 套档位预设、3 档微扰强度（默认：中，12 项黄金无损组合）及「一键随机组合」，兼顾高过审率与原始画质清晰度。\n"
+    "4. 如果电脑尚未安装 Ollama 且不想折腾配置，请到发布页下载【内置 Ollama 全能版】。\n"
     + MODEL_LINKS_GUIDE
     + "\n【注意】\n请勿移动或删除同目录下的 _internal、bin、models 和 config 文件夹。\n"
 )
 
 README_WITH_OLLAMA_TEXT = (
-    "==================== 双语字幕工坊 V1.5.1（内置 Ollama 全能版 · 开箱即用）====================\n\n"
+    "==================== 双语字幕工坊 V1.5.2（内置 Ollama 全能版 · 开箱即用）====================\n\n"
     "【版本说明】\n"
     "1. 本版本已在 runtime\\ollama\\ 中完整内置跨硬件 Ollama 引擎（支持 NVIDIA CUDA12、AMD/Intel Vulkan 与 CPU 自动回退），无需在目标电脑提前安装 Ollama！\n"
     "2. 启动软件后会自动检测：若系统本身未开外部 Ollama，软件将在后台静默托管启动内置 Ollama（退出软件时自动安全关闭）。\n"
     "3. 一条龙用法：\n"
     "   - 只需从下方直链下载任意一个 `.gguf` 翻译模型放到本目录下的 `models\\llm\\` 文件夹；\n"
     "   - 打开 `双语字幕工坊.exe`，点第 2 页「扫描导入 models/llm 本地模型」（或直接选中原视频文件夹点顶部「🚀 一键全自动一条龙」自动扫描导入并出片）。\n"
-    "4. 依旧 100% 保留：第 1/2 页「手动复制 Agent 提示词」、第 2 页中英对照双击秒改，以及第 3 页主字幕 + 单条花字左图直接拖拽 (X, Y) 自由定位。\n"
+    "4. V1.5.2 升级 17 项无损多维防查重引擎：支持 4 套档位预设、3 档微扰强度（默认：中）与「🎲 一键随机组合」（色度亚像素微移、动态 GOP、极微变调改声纹、无感粉红底噪等）。\n"
+    "5. 依旧 100% 保留：第 1/2 页「手动复制 Agent 提示词」、第 2 页中英对照双击秒改，以及第 3 页主字幕 + 单条花字左图直接拖拽 (X, Y) 自由定位。\n"
     + MODEL_LINKS_GUIDE
     + "\n【注意】\n请勿移动或删除同目录下的 _internal、bin、models、runtime 和 config 文件夹。\n"
 )
@@ -138,7 +140,7 @@ def _sync_dir(src: Path, dst: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="构建双语字幕工坊 V1.5.1 绿色免安装版")
+    parser = argparse.ArgumentParser(description="构建双语字幕工坊 V1.5.2 绿色免安装版")
     parser.add_argument(
         "--edition",
         choices=("lite", "with-ollama", "both"),
@@ -166,7 +168,7 @@ def main() -> None:
         str(PROJECT_DIR / "main.py"),
     ]
 
-    print(f"=== 开始 PyInstaller V1.5.1 绿色打包 (edition={args.edition}) ===")
+    print(f"=== 开始 PyInstaller V1.5.2 绿色打包 (edition={args.edition}) ===")
     subprocess.run(cmd, cwd=str(PROJECT_DIR), check=True)
 
     base_dir = PROJECT_DIR / "dist" / APP_NAME

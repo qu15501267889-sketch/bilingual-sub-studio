@@ -152,12 +152,14 @@ def run_self_test(video_path: Path) -> int:
     """无窗口端到端自测模式：验证 PP-OCRv5 DirectML + (X,Y)自由定位 + 花字覆写 + 内置 FFmpeg 全链路。"""
     import cv2
     from core.burner import (
+        DEDUP_PRESETS,
         DEFAULT_DEDUP_OPTIONS,
         BurnStyleConfig,
         burn_video,
         compute_effective_main_layout,
         compute_note_layout,
         detect_best_encoder,
+        generate_random_dedup_combo,
         get_video_info,
         render_burn_preview_with_meta,
     )
@@ -178,7 +180,7 @@ def run_self_test(video_path: Path) -> int:
         run_silent,
     )
 
-    print("=== 开始 V1.5.1 全链路自测 ===")
+    print("=== 开始 V1.5.2 全链路自测 ===")
     print("AppDir :", get_app_dir())
     print("Models :", get_models_dir())
     print("FFmpeg :", get_ffmpeg_exe())
@@ -304,12 +306,47 @@ def run_self_test(video_path: Path) -> int:
             print(f"[FAIL] 原子输出异常或 SAR 不规范: leftovers={leftovers}, SAR={sar_val}")
             return 5
 
+        # V1.5.2 新增防查重档位预设、一键随机组合及强力档真实压制校验
+        for pkey in ("light", "medium", "strong", "raw"):
+            if pkey not in DEDUP_PRESETS:
+                print(f"[FAIL] 缺少防查重预设: {pkey}")
+                return 27
+        rand_combos = [generate_random_dedup_combo() for _ in range(5)]
+        for ropts, rstr in rand_combos:
+            if ropts.get("blur_frame") or (not ropts.get("strip_metadata")) or (not ropts.get("per_video_jitter")) or rstr not in ("low", "medium", "high"):
+                print(f"[FAIL] 一键随机防查重安全约束校验失败: str={rstr}, opts={ropts}")
+                return 28
+        unique_cnt = len({(rstr, tuple(sorted(k for k, v in ropts.items() if v))) for ropts, rstr in rand_combos})
+        print(f"[自测-随机防查重] 5次随机生成 {unique_cnt} 组不同安全组合 (全无模糊框)")
+
+        strong_mp4 = tmp / "selftest_strong_3s.mp4"
+        ok_strong = burn_video(
+            video_path,
+            zh_srt,
+            strong_mp4,
+            mode="auto",
+            dedup_options=DEDUP_PRESETS["strong"]["options"],
+            style=BurnStyleConfig(),
+            test_sec=3,
+            layout_json_path=layout_json_p,
+            dedup_strength="high",
+            dedup_seed=20261127,
+        )
+        if not ok_strong or not strong_mp4.exists() or strong_mp4.stat().st_size < 50_000:
+            print("[FAIL] 强力高强度无损去重档位压制失败")
+            return 29
+        strong_info = get_video_info(strong_mp4)
+        print(f"[自测-强力高档] {strong_info['w']}x{strong_info['h']} duration={strong_info['duration']:.2f}s has_audio={strong_info['has_audio']}")
+        if strong_info["w"] != out_info["w"] or strong_info["h"] != out_info["h"] or (not strong_info["has_audio"]):
+            print("[FAIL] 强力档成片分辨率或音轨校验异常")
+            return 30
+
     print("[SELF-TEST PASS] 全链路验证通过！")
     return 0
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="双语字幕工坊 V1.5.1")
+    parser = argparse.ArgumentParser(description="双语字幕工坊 V1.5.2")
     parser.add_argument("--self-test", type=Path, default=None, help="运行无窗口端到端自测模式")
     parser.add_argument("--test-embedded-ollama", action="store_true", help="在隔离端口验证内置 Ollama 启动、版本探测、GGUF推断与退出")
     parser.add_argument("--test-translate", action="store_true", help="运行内置 AI 翻译冒烟自测（本机 Ollama Index-Translate-9B）")

@@ -1,15 +1,21 @@
-# 双语字幕工坊 (BilingualSubStudio) V1.5.1
+# 双语字幕工坊 (BilingualSubStudio) V1.5.2
 
-面向中文短剧 / 二创短视频出海（YouTube 等平台）的一站式桌面双语字幕本地化工具。  
-集成 **离线 PP-OCRv5 高精度双轨提取**、**内置/外置 Ollama 与云端 API 一键一条龙自动翻译（完整保留手动 Agent 提示词）**、**`models/llm/` 本地模型一键导入**，以及 **主字幕 + 单条花字自由 `(X, Y)` 拖拽排版与多重防查重批量烧录**。
+面向中文短剧 / 二创短视频出海（YouTube / TikTok 等平台）的一站式桌面双语字幕本地化工具。  
+集成 **离线 PP-OCRv5 高精度双轨提取**、**内置/外置 Ollama 与云端 API 一键一条龙自动翻译（完整保留手动 Agent 提示词）**、**`models/llm/` 本地模型一键导入**、**主字幕 + 单条花字自由 `(X, Y)` 拖拽排版**，以及 **V1.5.2 无损多维防查重与一键随机组合引擎**。
 
 ---
 
-## 核心特性（V1.5.1）
+## 核心特性（V1.5.2）
 
-1. **提供双版本发行包（开箱任选，均不含大模型权重以控制包体积）**
-   - **内置 Ollama 全能版（`BilingualSubStudio-v1.5.1-Portable-WithOllama-Win64.zip`）**：已内置精简后的跨硬件 Ollama 运行时（支持 **NVIDIA CUDA 12**、**AMD/Intel Vulkan** 与 CPU 回退）。启动软件或运行翻译时若未检测到系统服务会自动静默托管拉起，退出时自动关闭，目标电脑**无需安装 Python、FFmpeg 或系统 Ollama**。
-   - **标准轻量版（`BilingualSubStudio-v1.5.1-Portable-Lite-Win64.zip`）**：体积轻巧（约 406 MB），适合已安装过 Ollama 的本机、仅使用云端 API 翻译，或仅做提取/烧录配外部 Agent 翻译的用户。
+1. **全新升级：17 项无损多维防查重引擎（默认推荐「强度：中」12 项黄金组合）**
+   - **4 套一键档位**：`轻度无损`、`推荐默认(中)`、`强力深度(高)`、`原画质(关)`。
+   - **3 档微扰强度**：`低 (极致无损)` / `中 (推荐默认)` / `高 (强力防搬运)`。
+   - **「🎲 一键随机组合」**：每次点击自动在安全无损范围内随机抽取视频、声纹与轻感进阶组合及强度档位，且每条视频单独生成随机微扰种子（彻底打破固定模板指纹）。
+   - **核心无损/零感知手段**：每片随机独立微扰、帧率微调 + 动态随机 GOP、色度通道亚像素微偏移 (`chromashift`) + ±1° 微色相、片头尾 0.3s 同步淡入淡出、极微变调移频保语速、立体声 Haas 微相位 + `-48dB` 无感粉红底噪、清洗并写入干净伪装时间戳元数据，及进阶可选「零模糊极慢镜头微游走」。
+
+2. **提供双版本发行包（开箱任选，均不含大模型权重以控制包体积）**
+   - **内置 Ollama 全能版（`BilingualSubStudio-v1.5.2-Portable-WithOllama-Win64.zip`）**：已内置精简后的跨硬件 Ollama 运行时（支持 **NVIDIA CUDA 12**、**AMD/Intel Vulkan** 与 CPU 回退）。启动软件或运行翻译时若未检测到系统服务会自动静默托管拉起，退出时自动关闭，目标电脑**无需安装 Python、FFmpeg 或系统 Ollama**。
+   - **标准轻量版（`BilingualSubStudio-v1.5.2-Portable-Lite-Win64.zip`）**：体积轻巧，适合已安装过 Ollama 的本机、仅使用云端 API 翻译，或仅做提取/烧录配外部 Agent 翻译的用户。
 
 2. **放入 `.gguf` 模型一键导入（零命令行）**
    - 把推荐翻译模型下载为 `.gguf` 后直接放入程序目录下的 **`models/llm/`** 文件夹，在软件第 2 页点击 **「📥 扫描导入 models/llm 本地模型」**（或直接点击顶部「🚀 一键全自动一条龙」），程序会自动生成最佳模板并注册进 Ollama。
@@ -49,9 +55,9 @@
 ## 快速开始
 
 ### 方式一：下载绿色免安装版（推荐 Windows 10/11 用户）
-1. 前往本仓库 [Releases](../../releases) 页面按需选择下载 **V1.5.1**：
-   - 未装过 Ollama 想要完整一条龙：下载 **`BilingualSubStudio-v1.5.1-Portable-WithOllama-Win64.zip`**
-   - 仅提取/烧录或已有外部 Ollama / 云端 API：下载 **`BilingualSubStudio-v1.5.1-Portable-Lite-Win64.zip`**
+1. 前往本仓库 [Releases](../../releases) 页面按需选择下载 **V1.5.2**：
+   - 未装过 Ollama 想要完整一条龙：下载 **`BilingualSubStudio-v1.5.2-Portable-WithOllama-Win64.zip`**
+   - 仅提取/烧录或已有外部 Ollama / 云端 API：下载 **`BilingualSubStudio-v1.5.2-Portable-Lite-Win64.zip`**
 2. 解压后把你选好的 `.gguf` 翻译模型放入 `models\llm\`（如果仅用云端 API 或外部 Agent 可跳过此步），双击 **`双语字幕工坊.exe`** 即可使用。
 
 ### 方式二：从源码运行与自打包

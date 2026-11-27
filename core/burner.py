@@ -1,11 +1,13 @@
 import json
 import os
+import random
 import re
+import secrets
 import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -16,33 +18,256 @@ from PIL import Image, ImageDraw, ImageFont
 from core.runtime_paths import get_ffmpeg_exe, get_ffprobe_exe, popen_silent, run_silent
 
 # ================= 默认多维去重与样式配置 =================
+# 共 17 项防查重手段：默认方案为「强度：中」12 项黄金无损组合（对画面清晰度/观感与听感几近零损伤）
 DEFAULT_DEDUP_OPTIONS: dict[str, bool] = {
+    # --- 无损/零感知默认开启（12项）---
     "trim_head_tail": True,      # 智能掐头去尾（保护首句和片尾金句）
-    "micro_speed": True,         # 全片 1.025x 微变速（音画字幕100%同步）
-    "micro_zoom": True,          # 全屏 1.03x 微缩放裁剪（不镜像保护中文）
-    "color_grade": True,         # 轻电影感调色 + 锐化
-    "film_grain": True,          # 90年代轻胶片颗粒
-    "subtle_vignette": True,     # 极轻微电影镜头暗角
-    "audio_fingerprint": True,   # 音频防查重（EQ+微空间感重编码）
-    "strip_metadata": True,      # 清空老抖音元数据
-    "micro_rotate": False,       # 进阶可选：0.6度微旋转补边
-    "blur_frame": False,         # 进阶可选：86%居中主画面 + 高斯模糊暗背景 + 顶部标题栏
+    "micro_speed": True,         # 微变速（默认 ~1.025x 随强度微扰，音画字幕100%同步）
+    "micro_zoom": True,          # 微缩放裁切（默认 ~1.03x + 非对称中心微偏，不镜像护中文）
+    "color_grade": True,         # 电影感轻调色 + 微锐化
+    "strip_metadata": True,      # 清旧元数据 + 写入干净随机原生拍摄/导出元数据
+    "per_video_jitter": True,    # 每片独立随机微扰（打破批量同模板指纹）
+    "fps_gop_rebuild": True,     # 帧率微调 (如 29.97fps) + 动态随机 GOP 关键帧结构
+    "chroma_subshift": True,     # 色度通道亚像素微偏移 + ±1°微色相（肉眼几近无感，直击像素频域）
+    "soft_fade_io": True,        # 片头/片尾 ~0.3s 丝滑淡入淡出（隔离高权重首尾抽帧）
+    "audio_fingerprint": True,   # 音频改声纹（EQ+微空间感重编码）
+    "audio_micro_pitch": True,   # 极微变调移频（±1.5%~2% 保语速，穿透音频基频声纹）
+    "audio_stereo_pink": True,   # 立体声 Haas 微相位差 + -48dB 无感粉红底噪填补空洞
+    # --- 轻度风格 / 进阶可选（默认关闭，5项）---
+    "film_grain": False,         # 90年代怀旧轻胶片颗粒
+    "subtle_vignette": False,    # 极轻微电影镜头暗角
+    "micro_pan_drift": False,    # 进阶：零模糊极慢镜头微游走（连续帧网格漂移破 pHash）
+    "micro_rotate": False,       # 进阶：微旋转补边（默认 ~0.6° 随强度微扰）
+    "blur_frame": False,         # 进阶：86%居中主画面 + 高斯模糊暗背景 + 顶部标题栏
 }
 
 RAW_DEDUP_OPTIONS: dict[str, bool] = {k: False for k in DEFAULT_DEDUP_OPTIONS}
 
 DEDUP_LABELS: list[tuple[str, str]] = [
-    ("trim_head_tail", "智能掐头去尾（不吞台词）"),
-    ("micro_speed", "1.025x 微变速（防时长查重）"),
-    ("micro_zoom", "1.03x 微缩放（不镜像护中文）"),
-    ("color_grade", "电影感轻调色 + 锐化"),
-    ("film_grain", "90年代怀旧轻胶片颗粒"),
+    ("trim_head_tail", "智能掐头去尾"),
+    ("micro_speed", "微变速(防时长重)"),
+    ("micro_zoom", "微缩放(护中文)"),
+    ("color_grade", "轻电影调色+锐化"),
+    ("strip_metadata", "干净伪装元数据"),
+    ("per_video_jitter", "每片随机独立微扰"),
+    ("fps_gop_rebuild", "帧率微调+动态GOP"),
+    ("chroma_subshift", "色度亚像素微移"),
+    ("soft_fade_io", "首尾0.3s微淡入淡出"),
+    ("audio_fingerprint", "音频EQ+微空间感"),
+    ("audio_micro_pitch", "极微变调改声纹"),
+    ("audio_stereo_pink", "微相位+无感粉红噪"),
+    ("film_grain", "怀旧轻胶片颗粒"),
     ("subtle_vignette", "极轻微镜头暗角"),
-    ("audio_fingerprint", "音频改声纹（EQ+人声提亮）"),
-    ("strip_metadata", "彻底清除原平台元数据"),
-    ("micro_rotate", "[进阶] 0.6度微旋转补边"),
-    ("blur_frame", "[进阶] 86%居中+模糊暗框+顶标"),
+    ("micro_pan_drift", "[进阶]极慢镜头微游走"),
+    ("micro_rotate", "[进阶]微旋转补边"),
+    ("blur_frame", "[进阶]86%居中模糊框"),
 ]
+
+DEDUP_STRENGTH_CHOICES: list[tuple[str, str]] = [
+    ("low", "低 (极致无损)"),
+    ("medium", "中 (推荐默认)"),
+    ("high", "高 (强力防搬运)"),
+]
+
+DEDUP_PRESETS: dict[str, dict] = {
+    "light": {
+        "name": "轻度无损",
+        "strength": "low",
+        "options": {
+            **RAW_DEDUP_OPTIONS,
+            "trim_head_tail": True,
+            "micro_speed": True,
+            "micro_zoom": True,
+            "strip_metadata": True,
+            "per_video_jitter": True,
+            "fps_gop_rebuild": True,
+            "chroma_subshift": True,
+            "audio_fingerprint": True,
+        },
+    },
+    "medium": {
+        "name": "推荐默认(中)",
+        "strength": "medium",
+        "options": dict(DEFAULT_DEDUP_OPTIONS),
+    },
+    "strong": {
+        "name": "强力深度(高)",
+        "strength": "high",
+        "options": {
+            **DEFAULT_DEDUP_OPTIONS,
+            "film_grain": True,
+            "subtle_vignette": True,
+            "micro_pan_drift": True,
+            "micro_rotate": True,
+            "blur_frame": False,
+        },
+    },
+    "raw": {
+        "name": "原画质(关)",
+        "strength": "low",
+        "options": dict(RAW_DEDUP_OPTIONS),
+    },
+}
+
+_RANDOM_VIDEO_POOL: tuple[str, ...] = (
+    "trim_head_tail",
+    "micro_speed",
+    "micro_zoom",
+    "color_grade",
+    "chroma_subshift",
+    "soft_fade_io",
+    "fps_gop_rebuild",
+)
+_RANDOM_AUDIO_POOL: tuple[str, ...] = (
+    "audio_fingerprint",
+    "audio_micro_pitch",
+    "audio_stereo_pink",
+)
+_RANDOM_ADV_POOL: tuple[str, ...] = (
+    "film_grain",
+    "subtle_vignette",
+    "micro_pan_drift",
+    "micro_rotate",
+)
+
+
+def generate_random_dedup_combo(seed: Optional[int] = None) -> tuple[dict[str, bool], str]:
+    """生成安全、无重度画质损伤的随机防查重选项组合与强度档位。"""
+    rng = random.Random(seed if seed is not None else secrets.randbits(32))
+    strength = rng.choices(["low", "medium", "high"], weights=[25, 55, 20], k=1)[0]
+
+    opts = dict(RAW_DEDUP_OPTIONS)
+    opts["strip_metadata"] = True
+    opts["per_video_jitter"] = True
+    opts["blur_frame"] = False
+
+    for k in rng.sample(_RANDOM_VIDEO_POOL, rng.randint(5, len(_RANDOM_VIDEO_POOL))):
+        opts[k] = True
+    for k in rng.sample(_RANDOM_AUDIO_POOL, rng.randint(2, len(_RANDOM_AUDIO_POOL))):
+        opts[k] = True
+    adv_cnt = rng.randint(0, 2)
+    if adv_cnt > 0:
+        for k in rng.sample(_RANDOM_ADV_POOL, adv_cnt):
+            opts[k] = True
+    return opts, strength
+
+
+def _build_dedup_params(
+    opts: dict[str, bool],
+    strength: str = "medium",
+    seed: Optional[int] = None,
+) -> dict:
+    """根据强度档位与独立随机微扰开关，计算单部成片专属的防查重微调参数。"""
+    st = strength if strength in ("low", "medium", "high") else "medium"
+    jitter = bool(opts.get("per_video_jitter", True))
+
+    if seed is not None:
+        eff_seed = int(seed)
+    elif jitter:
+        eff_seed = secrets.randbits(32)
+    else:
+        eff_seed = 20261127
+    rng = random.Random(eff_seed)
+
+    def _jit(base: float, amp: float) -> float:
+        return base + rng.uniform(-amp, amp) if jitter else base
+
+    if st == "low":
+        speed_base, speed_amp = 1.015, 0.004
+        zoom_base, zoom_amp = 1.020, 0.004
+        pan_amp_ratio = 0.004
+        rot_base, rot_amp = 0.40, 0.08
+        c_base, b_base, s_base, u_base = 1.020, 0.005, 1.030, 0.22
+        hue_amp = 0.70
+        grain_alls, vignette_div = 2, 8
+        pitch_amp = 0.012
+        eq_gain, delay_ms, stereo_m, pink_amp = 1.2, 3, 1.04, 0.0018
+    elif st == "high":
+        speed_base, speed_amp = 1.036, 0.008
+        zoom_base, zoom_amp = 1.042, 0.006
+        pan_amp_ratio = 0.008
+        rot_base, rot_amp = 0.85, 0.15
+        c_base, b_base, s_base, u_base = 1.050, 0.014, 1.090, 0.42
+        hue_amp = 1.60
+        grain_alls, vignette_div = 4, 6
+        pitch_amp = 0.023
+        eq_gain, delay_ms, stereo_m, pink_amp = 1.8, 5, 1.09, 0.0038
+    else:
+        speed_base, speed_amp = 1.025, 0.006
+        zoom_base, zoom_amp = 1.030, 0.005
+        pan_amp_ratio = 0.006
+        rot_base, rot_amp = 0.60, 0.12
+        c_base, b_base, s_base, u_base = 1.035, 0.010, 1.060, 0.32
+        hue_amp = 1.10
+        grain_alls, vignette_div = 3, 7
+        pitch_amp = 0.018
+        eq_gain, delay_ms, stereo_m, pink_amp = 1.5, 4, 1.06, 0.0028
+
+    do_pan = bool(opts.get("micro_pan_drift"))
+    do_zoom = bool(opts.get("micro_zoom")) or do_pan
+    speed = round(_jit(speed_base, speed_amp), 4) if opts.get("micro_speed") else 1.0
+    if do_zoom:
+        zoom = round(_jit(zoom_base, zoom_amp), 4)
+        if do_pan:
+            zoom = max(zoom, 1.046)
+    else:
+        zoom = 1.0
+
+    rot_sign = rng.choice((-1.0, 1.0)) if jitter else 1.0
+    rotate_deg = round(rot_sign * _jit(rot_base, rot_amp), 3) if opts.get("micro_rotate") else 0.0
+
+    chroma_sign = rng.choice((-1, 1)) if jitter else 1
+    hue_sign = rng.choice((-1.0, 1.0)) if jitter else 1.0
+    hue_deg = round(hue_sign * (rng.uniform(hue_amp * 0.45, hue_amp) if jitter else hue_amp * 0.7), 2)
+
+    pitch_sign = rng.choice((-1.0, 1.0)) if jitter else 1.0
+    if opts.get("audio_micro_pitch"):
+        delta = rng.uniform(pitch_amp * 0.65, pitch_amp) if jitter else pitch_amp * 0.8
+        pitch_factor = round(max(0.974, min(1.026, 1.0 + pitch_sign * delta)), 5)
+    else:
+        pitch_factor = 1.0
+
+    fake_dt = datetime.now(timezone.utc) - timedelta(
+        days=rng.randint(1, 25),
+        hours=rng.randint(0, 23),
+        minutes=rng.randint(0, 59),
+        seconds=rng.randint(0, 59),
+    )
+
+    return {
+        "seed": eff_seed,
+        "strength": st,
+        "speed": speed,
+        "zoom": zoom,
+        "crop_bias_x": round(rng.uniform(-0.35, 0.35), 3) if jitter else 0.0,
+        "crop_bias_y": round(rng.uniform(-0.35, 0.35), 3) if jitter else 0.0,
+        "pan_amp_ratio": pan_amp_ratio,
+        "pan_period_x": round(rng.uniform(18.0, 26.0), 1) if jitter else 20.0,
+        "pan_period_y": round(rng.uniform(21.0, 29.0), 1) if jitter else 24.0,
+        "rotate_deg": rotate_deg,
+        "contrast": round(_jit(c_base, 0.006), 3),
+        "brightness": round(_jit(b_base, 0.004), 4),
+        "saturation": round(_jit(s_base, 0.012), 3),
+        "unsharp_luma": round(_jit(u_base, 0.05), 2),
+        "rs": round(_jit(0.018, 0.007), 3),
+        "gs": round(_jit(0.008, 0.005), 3),
+        "bs": round(_jit(-0.018, 0.007), 3),
+        "chroma_cbh": chroma_sign,
+        "chroma_crh": -chroma_sign,
+        "hue_deg": hue_deg,
+        "grain_alls": grain_alls,
+        "vignette_div": vignette_div,
+        "fade_in": round(rng.uniform(0.25, 0.35), 2) if jitter else 0.30,
+        "fade_out": round(rng.uniform(0.30, 0.42), 2) if jitter else 0.35,
+        "pitch_factor": pitch_factor,
+        "eq_gain": eq_gain,
+        "stereo_delay_ms": delay_ms,
+        "stereo_m": stereo_m,
+        "pink_amp": pink_amp,
+        "gop_size": rng.randint(48, 72) if jitter else 60,
+        "fake_creation_time": fake_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "fake_comment": f"BSS-152-{eff_seed & 0xFFFFFF:06X}",
+    }
 
 # ASS 使用 &H00BBGGRR 顺序，PIL 使用 (R, G, B)
 COLOR_PRESETS: dict[str, tuple[str, tuple[int, int, int]]] = {
@@ -119,7 +344,7 @@ def get_video_info(video_path: Path) -> dict:
     ffprobe = get_ffprobe_exe()
     cmd = [
         ffprobe, "-v", "error",
-        "-show_entries", "format=duration:stream=codec_type,width,height,r_frame_rate:stream_tags=rotate:stream_side_data=rotation",
+        "-show_entries", "format=duration:stream=codec_type,width,height,r_frame_rate,sample_rate,channels:stream_tags=rotate:stream_side_data=rotation",
         "-of", "json",
         str(video_path),
     ]
@@ -127,7 +352,23 @@ def get_video_info(video_path: Path) -> dict:
     data = json.loads(res.stdout)
 
     v_stream = next(s for s in data["streams"] if s.get("codec_type") == "video")
-    has_audio = any(s.get("codec_type") == "audio" for s in data["streams"])
+    a_stream = next((s for s in data["streams"] if s.get("codec_type") == "audio"), None)
+    has_audio = a_stream is not None
+    audio_sr = 48000
+    audio_ch = 2
+    if a_stream is not None:
+        try:
+            sr_val = int(a_stream.get("sample_rate") or 48000)
+            if 8000 <= sr_val <= 192000:
+                audio_sr = sr_val
+        except Exception:
+            pass
+        try:
+            ch_val = int(a_stream.get("channels") or 2)
+            if 1 <= ch_val <= 8:
+                audio_ch = ch_val
+        except Exception:
+            pass
 
     w, h = int(v_stream["width"]), int(v_stream["height"])
     rotation = 0
@@ -149,7 +390,15 @@ def get_video_info(video_path: Path) -> dict:
     fps = min(60.0, max(24.0, round(fps)))
 
     duration = float(data.get("format", {}).get("duration", 0.0) or 0.0)
-    return {"w": w, "h": h, "fps": int(fps), "duration": duration, "has_audio": has_audio}
+    return {
+        "w": w,
+        "h": h,
+        "fps": int(fps),
+        "duration": duration,
+        "has_audio": has_audio,
+        "audio_sample_rate": audio_sr,
+        "audio_channels": audio_ch,
+    }
 
 
 def parse_srt_time_to_sec(t: str) -> float:
@@ -273,9 +522,12 @@ def compute_effective_main_layout(
     支持根据原中文字幕位置及缩放裁剪参数全自动防重叠定位（放下方或自动改放上方）。
     """
     is_blur_frame = bool(opts.get("blur_frame"))
-    is_zoom = bool(opts.get("micro_zoom")) or bool(opts.get("micro_rotate"))
+    do_pan = bool(opts.get("micro_pan_drift"))
+    do_zoom = bool(opts.get("micro_zoom")) or do_pan
+    zoom_scale = 1.046 if do_pan else (1.03 if do_zoom else 1.0)
+    is_zoom = do_zoom or bool(opts.get("micro_rotate"))
     total_scale = (
-        (1.03 if opts.get("micro_zoom") else 1.0)
+        zoom_scale
         * (1.025 if opts.get("micro_rotate") else 1.0)
         * (0.86 if is_blur_frame else 1.0)
     )
@@ -382,8 +634,11 @@ def compute_note_layout(
 ) -> dict:
     """预览与 ASS 共用同一套花字定位与防出画计算公式（支持单条花字手动坐标覆写）。"""
     is_blur_frame = bool(opts.get("blur_frame"))
+    do_pan = bool(opts.get("micro_pan_drift"))
+    do_zoom = bool(opts.get("micro_zoom")) or do_pan
+    zoom_scale = 1.046 if do_pan else (1.03 if do_zoom else 1.0)
     total_scale = (
-        (1.03 if opts.get("micro_zoom") else 1.0)
+        zoom_scale
         * (1.025 if opts.get("micro_rotate") else 1.0)
         * (0.86 if is_blur_frame else 1.0)
     )
@@ -534,9 +789,10 @@ def render_burn_preview_with_meta(
     h, w = frame_bgr.shape[:2]
     work = frame_bgr.copy()
 
-    if opts.get("micro_zoom"):
-        wz = int(round(w * 1.03)) // 2 * 2
-        hz = int(round(h * 1.03)) // 2 * 2
+    if opts.get("micro_zoom") or opts.get("micro_pan_drift"):
+        zoom_prev = 1.046 if opts.get("micro_pan_drift") else 1.03
+        wz = int(round(w * zoom_prev)) // 2 * 2
+        hz = int(round(h * zoom_prev)) // 2 * 2
         resized = cv2.resize(work, (wz, hz), interpolation=cv2.INTER_LINEAR)
         x_off = (wz - w) // 2
         y_off = (hz - h) // 2
@@ -904,8 +1160,10 @@ def burn_video(
     layout_json_path: Optional[Path] = None,
     zh_band: Optional[tuple[float, float]] = None,
     shared_ocr=None,
+    dedup_strength: str = "medium",
+    dedup_seed: Optional[int] = None,
 ) -> bool:
-    """使用内置 ffmpeg 烧录双轨英文字幕与多维去重，支持全自动防重叠排版、实时压制进度与安全中止。"""
+    """使用内置 ffmpeg 烧录双轨英文字幕与多维无损去重，支持全自动防重叠排版、实时压制进度与安全中止。"""
 
     def log(msg: str):
         if log_cb:
@@ -921,11 +1179,13 @@ def burn_video(
     if dedup_options is not None:
         opts.update(dedup_options)
     style_cfg = style or BurnStyleConfig()
+    params = _build_dedup_params(opts, strength=dedup_strength, seed=dedup_seed)
 
     ffmpeg = get_ffmpeg_exe()
     enc_mode = detect_best_encoder() if mode == "auto" else mode
     info = get_video_info(video_path)
     w, h, fps, duration, has_audio = info["w"], info["h"], info["fps"], info["duration"], info["has_audio"]
+    audio_sr = int(info.get("audio_sample_rate") or 48000)
 
     main_events = parse_srt(main_srt_path)
     note_events = parse_srt(notes_srt_path)
@@ -946,10 +1206,13 @@ def burn_video(
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    speed = SPEED_FACTOR if opts.get("micro_speed") else 1.0
+    speed = params["speed"] if opts.get("micro_speed") else 1.0
     do_trim = bool(opts.get("trim_head_tail"))
     do_audio_fp = bool(opts.get("audio_fingerprint"))
+    do_audio_pitch = bool(opts.get("audio_micro_pitch"))
+    do_audio_pink = bool(opts.get("audio_stereo_pink"))
     do_blur_frame = bool(opts.get("blur_frame"))
+    do_fps_gop = bool(opts.get("fps_gop_rebuild"))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_ass = Path(tmpdir) / "sub_v3.ass"
@@ -963,24 +1226,50 @@ def burn_video(
             log(f"[手动自由定位] {video_path.name} | {layout['reason']}")
 
         pre_filters: list[str] = []
-        if opts.get("micro_zoom"):
-            wz = int(round(w * 1.03)) // 2 * 2
-            hz = int(round(h * 1.03)) // 2 * 2
-            pre_filters.append(f"scale={wz}:{hz},crop={w}:{h},setsar=1")
+        do_pan = bool(opts.get("micro_pan_drift"))
+        do_zoom = bool(opts.get("micro_zoom")) or do_pan
+        if do_zoom:
+            wz = max(w + 4, int(round(w * params["zoom"])) // 2 * 2)
+            hz = max(h + 4, int(round(h * params["zoom"])) // 2 * 2)
+            if do_pan:
+                max_ax = max(1, (wz - w) // 2 - 1)
+                max_ay = max(1, (hz - h) // 2 - 1)
+                amp_x = min(max_ax, max(1, int(round(w * params["pan_amp_ratio"]))))
+                amp_y = min(max_ay, max(1, int(round(h * params["pan_amp_ratio"]))))
+                px_per = params["pan_period_x"]
+                py_per = params["pan_period_y"]
+                pre_filters.append(
+                    f"scale={wz}:{hz},"
+                    f"crop={w}:{h}:'(in_w-out_w)/2+{amp_x}*sin(2*PI*t/{px_per:.1f})':'(in_h-out_h)/2+{amp_y}*cos(2*PI*t/{py_per:.1f})',setsar=1"
+                )
+            else:
+                x_center = (wz - w) // 2
+                y_center = (hz - h) // 2
+                x0 = max(0, min(wz - w, x_center + int(round((wz - w) * 0.5 * params["crop_bias_x"]))))
+                y0 = max(0, min(hz - h, y_center + int(round((hz - h) * 0.5 * params["crop_bias_y"]))))
+                pre_filters.append(f"scale={wz}:{hz},crop={w}:{h}:{x0}:{y0},setsar=1")
 
         if opts.get("micro_rotate"):
-            wz_r = int(round(w * 1.025)) // 2 * 2
-            hz_r = int(round(h * 1.025)) // 2 * 2
-            pre_filters.append(f"scale={wz_r}:{hz_r},rotate=0.6*PI/180:bilinear=1,crop={w}:{h},setsar=1")
+            wz_r = max(w + 4, int(round(w * 1.028)) // 2 * 2)
+            hz_r = max(h + 4, int(round(h * 1.028)) // 2 * 2)
+            rot_deg = params["rotate_deg"]
+            pre_filters.append(f"scale={wz_r}:{hz_r},rotate={rot_deg}*PI/180:bilinear=1,crop={w}:{h},setsar=1")
+
+        if opts.get("chroma_subshift"):
+            pre_filters.append(f"chromashift=cbh={params['chroma_cbh']}:crh={params['chroma_crh']},hue=h={params['hue_deg']:.2f}")
 
         if opts.get("color_grade"):
-            pre_filters.append("eq=contrast=1.04:brightness=0.01:saturation=1.07,colorbalance=rs=0.02:gs=0.01:bs=-0.02,unsharp=3:3:0.35")
+            pre_filters.append(
+                f"eq=contrast={params['contrast']:.3f}:brightness={params['brightness']:.4f}:saturation={params['saturation']:.3f},"
+                f"colorbalance=rs={params['rs']:.3f}:gs={params['gs']:.3f}:bs={params['bs']:.3f},"
+                f"unsharp=3:3:{params['unsharp_luma']:.2f}"
+            )
 
         if opts.get("film_grain"):
-            pre_filters.append("noise=alls=3:allf=t+u")
+            pre_filters.append(f"noise=alls={params['grain_alls']}:allf=t+u")
 
         if opts.get("subtle_vignette"):
-            pre_filters.append("vignette=PI/7")
+            pre_filters.append(f"vignette=PI/{params['vignette_div']}")
 
         pre_chain = ",".join(pre_filters)
 
@@ -1004,38 +1293,98 @@ def burn_video(
             t_end = min(t_end, t_start + test_sec * speed)
 
         expected_out_dur = max(1.0, (t_end - t_start) / speed) if (t_end > t_start) else max(1.0, float(test_sec or duration or 10.0))
+        do_fade_io = bool(opts.get("soft_fade_io")) and (expected_out_dur > 1.5)
+        fade_in_d = params["fade_in"]
+        fade_out_d = params["fade_out"]
+        fade_out_st = max(0.35, expected_out_dur - fade_out_d - 0.05)
+
+        if do_fps_gop:
+            fps_map = {30: "30000/1001", 60: "60000/1001", 24: "24000/1001"}
+            target_fps = fps_map.get(fps, str(fps))
+        else:
+            target_fps = str(fps)
 
         need_time_filter = do_trim or (test_sec > 0) or (abs(speed - 1.0) > 1e-6)
+        v_tail: list[str] = []
         if need_time_filter:
-            trim_v = f"trim=start={t_start:.3f}:end={t_end:.3f},"
-            pts_v = f"setpts=(PTS-STARTPTS)/{speed}" if abs(speed - 1.0) > 1e-6 else "setpts=PTS-STARTPTS"
-            vf_full = f"{video_base},{trim_v}{pts_v},fps={fps}[vout]"
-        else:
-            vf_full = f"{video_base}[vout]"
+            v_tail.append(f"trim=start={t_start:.3f}:end={t_end:.3f}")
+            v_tail.append(f"setpts=(PTS-STARTPTS)/{speed}" if abs(speed - 1.0) > 1e-6 else "setpts=PTS-STARTPTS")
+        elif do_fade_io:
+            v_tail.append("setpts=PTS-STARTPTS")
 
-        need_audio_reencode = has_audio and (need_time_filter or do_audio_fp)
+        if do_fade_io:
+            v_tail.append(f"fade=t=in:st=0:d={fade_in_d:.2f}")
+            v_tail.append(f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.2f}")
+
+        if need_time_filter or do_fps_gop:
+            v_tail.append(f"fps={target_fps}")
+
+        vf_full = f"{video_base},{','.join(v_tail)}[vout]" if v_tail else f"{video_base}[vout]"
+
+        need_audio_reencode = has_audio and (need_time_filter or do_audio_fp or do_audio_pitch or do_audio_pink or do_fade_io)
         cmd = [ffmpeg, "-y", "-nostats", "-progress", "pipe:1", "-i", str(video_path.resolve())]
 
         if has_audio and need_audio_reencode:
             a_parts: list[str] = []
             if do_trim or (test_sec > 0):
                 a_parts.append(f"atrim=start={t_start:.3f}:end={t_end:.3f},asetpts=PTS-STARTPTS")
-            if abs(speed - 1.0) > 1e-6:
-                a_parts.append(f"atempo={speed}")
+            elif do_fade_io or do_audio_pink:
+                a_parts.append("asetpts=PTS-STARTPTS")
+
+            pitch_factor = params["pitch_factor"] if do_audio_pitch else 1.0
+            if do_audio_pitch and abs(pitch_factor - 1.0) > 1e-5:
+                new_sr = max(8000, int(round(audio_sr * pitch_factor)))
+                a_parts.append(f"asetrate={new_sr},aresample={audio_sr}")
+            total_atempo = speed / pitch_factor if pitch_factor > 0 else speed
+            if abs(total_atempo - 1.0) > 1e-5:
+                a_parts.append(f"atempo={total_atempo:.6f}")
+
             if do_audio_fp:
-                a_parts.append("highpass=f=80,equalizer=f=2800:width_type=h:width=1000:g=1.5,aecho=0.8:0.88:12:0.05")
-            af_full = ";[0:a]" + ",".join(a_parts) + "[aout]"
+                a_parts.append(f"highpass=f=80,equalizer=f=2800:width_type=h:width=1000:g={params['eq_gain']:.2f},aecho=0.8:0.88:12:0.05")
+
+            if do_audio_pink:
+                a_parts.append(
+                    f"aformat=channel_layouts=stereo,"
+                    f"adelay=0|{params['stereo_delay_ms']},"
+                    f"extrastereo=m={params['stereo_m']:.3f}"
+                )
+                fade_suffix = (
+                    f",afade=t=in:st=0:d={fade_in_d:.2f},afade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.2f}"
+                    if do_fade_io else ""
+                )
+                af_full = (
+                    f";[0:a]{','.join(a_parts)}[a_main];"
+                    f"anoisesrc=color=pink:sample_rate={audio_sr}:amplitude={params['pink_amp']:.5f},"
+                    f"aformat=channel_layouts=stereo[a_pink];"
+                    f"[a_main][a_pink]amix=inputs=2:duration=first:dropout_transition=0:normalize=0{fade_suffix}[aout]"
+                )
+            else:
+                if do_fade_io:
+                    a_parts.append(f"afade=t=in:st=0:d={fade_in_d:.2f}")
+                    a_parts.append(f"afade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.2f}")
+                if not a_parts:
+                    a_parts.append("anull")
+                af_full = ";[0:a]" + ",".join(a_parts) + "[aout]"
+
             cmd += ["-filter_complex", vf_full + af_full, "-map", "[vout]", "-map", "[aout]"]
             cmd += get_encoder_args(enc_mode)
+            if do_fps_gop:
+                cmd += ["-g", str(params["gop_size"])]
             cmd += ["-c:a", "aac", "-b:a", "192k"]
         else:
             cmd += ["-filter_complex", vf_full, "-map", "[vout]"]
             if has_audio:
                 cmd += ["-map", "0:a", "-c:a", "copy"]
             cmd += get_encoder_args(enc_mode)
+            if do_fps_gop:
+                cmd += ["-g", str(params["gop_size"])]
 
         if opts.get("strip_metadata"):
-            cmd += ["-map_metadata", "-1"]
+            cmd += [
+                "-map_metadata", "-1",
+                "-metadata", f"creation_time={params['fake_creation_time']}",
+                "-metadata", f"comment={params['fake_comment']}",
+            ]
 
         tmp_out = out_path.with_name(f".{out_path.stem}.building.mp4")
         if tmp_out.exists():
@@ -1048,6 +1397,11 @@ def burn_video(
 
         active_cnt = sum(1 for v in opts.values() if v)
         iprog(0.0, f"启动编码 ({enc_mode})...")
+        log(
+            f"[去重指纹] 强度={params['strength']} | 启用={active_cnt}项 | seed={params['seed']} | "
+            f"speed={speed:.4f}x | zoom={params['zoom']:.4f}x | pitch={params['pitch_factor']:.4f}x | "
+            f"gop={params['gop_size'] if do_fps_gop else 'auto'}"
+        )
         log(f"[烧录中] {video_path.name} (主:{len(main_events)}条, 花字:{len(note_events)}条, 编码:{enc_mode}, 去重项:{active_cnt}个)...")
 
         proc = popen_silent(
@@ -1148,6 +1502,8 @@ def burn_batch(
     log_cb: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
     per_video_styles: Optional[dict[str, BurnStyleConfig]] = None,
+    dedup_strength: str = "medium",
+    dedup_seed: Optional[int] = None,
 ) -> dict:
     """批量烧录匹配就绪的视频列表，支持每个视频独立字幕样式、日志自动落盘与实时进度回传。"""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1231,6 +1587,8 @@ def burn_batch(
                 cancel_event=cancel_event,
                 layout_json_path=item.get("layout_json_path"),
                 shared_ocr=shared_ocr,
+                dedup_strength=dedup_strength,
+                dedup_seed=dedup_seed,
             )
             if ok:
                 done += 1

@@ -15,12 +15,15 @@ from core.burner import (
     AUTO_PLACE_CHOICES,
     COLOR_PRESETS,
     DEDUP_LABELS,
+    DEDUP_PRESETS,
+    DEDUP_STRENGTH_CHOICES,
     DEFAULT_DEDUP_OPTIONS,
     ENCODER_CHOICES,
     BurnStyleConfig,
     burn_batch,
     compute_effective_main_layout,
     detect_best_encoder,
+    generate_random_dedup_combo,
     load_or_detect_zh_band,
     parse_srt,
     render_burn_preview_with_meta,
@@ -98,11 +101,11 @@ def _fmt_sec(sec: float) -> str:
 
 
 class BilingualSubStudioApp(tk.Tk):
-    """双语字幕工坊 V1.5.1（一条龙自动翻译 · 内置/外置 Ollama · 自由(X,Y)拖拽排版）。"""
+    """双语字幕工坊 V1.5.2（无损多维防查重 · 一键随机组合 · 内置/外置 Ollama · 自由(X,Y)拖拽排版）。"""
 
     def __init__(self):
         super().__init__()
-        self.title("双语字幕工坊 V1.5.1（一条龙自动翻译 · 内置/外置 Ollama · 自由(X,Y)拖拽排版）")
+        self.title("双语字幕工坊 V1.5.2（无损多维防查重 · 一键随机组合 · 内置/外置 Ollama · 自由(X,Y)拖拽）")
         sw = max(1220, self.winfo_screenwidth())
         sh = max(820, self.winfo_screenheight())
         self.geometry(f"{min(1440, sw - 50)}x{min(940, sh - 70)}")
@@ -198,7 +201,7 @@ class BilingualSubStudioApp(tk.Tk):
             font=("Microsoft YaHei UI", 9, "bold"),
         ).pack(side=tk.RIGHT)
 
-        ttk.Label(bar, text="双语字幕工坊 V1.5.1", font=("Microsoft YaHei UI", 13, "bold")).pack(side=tk.LEFT)
+        ttk.Label(bar, text="双语字幕工坊 V1.5.2", font=("Microsoft YaHei UI", 13, "bold")).pack(side=tk.LEFT)
         ttk.Label(
             bar,
             text="  |  一键全自动一条龙（提取 → AI翻译 → 烧录） · 亦保留手动 Agent 与逐帧校对",
@@ -779,8 +782,32 @@ class BilingualSubStudioApp(tk.Tk):
         ttk.Button(note_ctrl_row, text="复位本集花字", width=11, command=self._reset_all_note_overrides).pack(side=tk.RIGHT)
         sty_box.columnconfigure(1, weight=1)
 
-        dedup_box = ttk.LabelFrame(bf, text="多维防查重引擎（已默认勾选 8 项无损感去重）", padding=8)
+        dedup_box = ttk.LabelFrame(bf, text="多维无损防查重引擎（支持档位预设、3档强度与一键随机组合）", padding=8)
         dedup_box.pack(fill=tk.X, pady=(0, 8))
+
+        d_top_row = ttk.Frame(dedup_box)
+        d_top_row.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        ttk.Button(d_top_row, text="轻度无损", width=9, command=lambda: self._apply_dedup_preset("light")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(d_top_row, text="推荐默认(中)", width=11, command=lambda: self._apply_dedup_preset("medium")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(d_top_row, text="强力深度(高)", width=11, command=lambda: self._apply_dedup_preset("strong")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(d_top_row, text="原画质(关)", width=10, command=lambda: self._apply_dedup_preset("raw")).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(d_top_row, text="🎲 一键随机组合", command=self._randomize_dedup_combo).pack(side=tk.RIGHT)
+
+        d_str_row = ttk.Frame(dedup_box)
+        d_str_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        ttk.Label(d_str_row, text="微扰强度：").pack(side=tk.LEFT)
+        self._dedup_str_codes = [c for c, _ in DEDUP_STRENGTH_CHOICES]
+        self._dedup_str_labels = [l for _, l in DEDUP_STRENGTH_CHOICES]
+        self.var_dedup_strength = tk.StringVar(value=self._dedup_str_labels[1])
+        cmb_dstr = ttk.Combobox(
+            d_str_row, textvariable=self.var_dedup_strength,
+            values=self._dedup_str_labels, state="readonly", width=15,
+        )
+        cmb_dstr.pack(side=tk.LEFT, padx=(0, 10))
+        cmb_dstr.bind("<<ComboboxSelected>>", lambda _e: self._refresh_dedup_summary("自定义强度"))
+        self._dedup_preset_name = "推荐默认(中)"
+        self.var_dedup_summary = tk.StringVar(value="")
+        ttk.Label(d_str_row, textvariable=self.var_dedup_summary, foreground="#0b6bcb", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.dedup_vars: dict[str, tk.BooleanVar] = {}
         for idx, (key, label) in enumerate(DEDUP_LABELS):
@@ -790,21 +817,21 @@ class BilingualSubStudioApp(tk.Tk):
                 dedup_box,
                 text=label,
                 variable=var,
-                command=self._update_burn_preview if key in ("micro_zoom", "blur_frame") else None,
+                command=lambda k=key: self._on_dedup_option_toggled(k),
             )
-            cb.grid(row=idx // 2, column=idx % 2, sticky="w", padx=4, pady=2)
+            cb.grid(row=2 + (idx // 3), column=idx % 3, sticky="w", padx=3, pady=1)
 
         d_btn_row = ttk.Frame(dedup_box)
-        d_btn_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 2))
-        ttk.Button(d_btn_row, text="恢复默认8项去重", command=lambda: self._set_dedup_preset(True)).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(d_btn_row, text="全部取消(原画质)", command=lambda: self._set_dedup_preset(False)).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(d_btn_row, text="画框顶标：").pack(side=tk.LEFT)
+        d_btn_row.grid(row=2 + ((len(DEDUP_LABELS) + 2) // 3), column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        ttk.Label(d_btn_row, text="画框顶标(仅模糊框)：").pack(side=tk.LEFT)
         self.var_top_banner = tk.StringVar(value="90s Rural China · Official")
         ent_banner = ttk.Entry(d_btn_row, textvariable=self.var_top_banner)
         ent_banner.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ent_banner.bind("<FocusOut>", lambda _e: self._on_burn_style_edited())
         dedup_box.columnconfigure(0, weight=1)
         dedup_box.columnconfigure(1, weight=1)
+        dedup_box.columnconfigure(2, weight=1)
+        self._refresh_dedup_summary("推荐默认(中)")
 
         run_box = ttk.LabelFrame(bf, text="硬件编码与批量压制", padding=8)
         run_box.pack(fill=tk.BOTH, expand=True)
@@ -1886,6 +1913,7 @@ class BilingualSubStudioApp(tk.Tk):
         enc_idx = self._enc_labels.index(self.var_enc_label.get()) if self.var_enc_label.get() in self._enc_labels else 0
         enc_code = self._enc_codes[enc_idx]
         dedup_opts = self._get_dedup_options()
+        dedup_strength = self._get_dedup_strength()
         default_burn_style = self._style_dict_to_cfg(self._burn_default_style)
         per_video_burn_styles = {name: self._style_dict_to_cfg(st_dict) for name, st_dict in self._burn_video_styles.items()}
         burn_skip = bool(self.var_burn_skip.get())
@@ -2032,6 +2060,7 @@ class BilingualSubStudioApp(tk.Tk):
                 log_cb=_log3,
                 cancel_event=self._cancel_event,
                 per_video_styles=per_video_burn_styles,
+                dedup_strength=dedup_strength,
             )
 
             def _all_done():
@@ -2381,6 +2410,47 @@ class BilingualSubStudioApp(tk.Tk):
     def _get_dedup_options(self) -> dict[str, bool]:
         return {k: bool(var.get()) for k, var in self.dedup_vars.items()}
 
+    def _get_dedup_strength(self) -> str:
+        lbl = self.var_dedup_strength.get()
+        idx = self._dedup_str_labels.index(lbl) if lbl in self._dedup_str_labels else 1
+        return self._dedup_str_codes[idx]
+
+    def _refresh_dedup_summary(self, preset_name: Optional[str] = None) -> None:
+        if preset_name is not None:
+            self._dedup_preset_name = preset_name
+        cnt = sum(1 for var in self.dedup_vars.values() if var.get())
+        st_code = self._get_dedup_strength()
+        st_zh = {"low": "低", "medium": "中", "high": "高"}.get(st_code, "中")
+        self.var_dedup_summary.set(f"方案：{self._dedup_preset_name} | 强度：{st_zh} | 已启 {cnt}/{len(self.dedup_vars)} 项")
+
+    def _apply_dedup_preset(self, preset_key: str) -> None:
+        preset = DEDUP_PRESETS.get(preset_key, DEDUP_PRESETS["medium"])
+        opts = preset["options"]
+        for k, var in self.dedup_vars.items():
+            var.set(bool(opts.get(k, False)))
+        st_code = preset.get("strength", "medium")
+        if st_code in self._dedup_str_codes:
+            self.var_dedup_strength.set(self._dedup_str_labels[self._dedup_str_codes.index(st_code)])
+        self._refresh_dedup_summary(preset.get("name", "自定义"))
+        self._update_burn_preview()
+
+    def _randomize_dedup_combo(self) -> None:
+        opts, st_code = generate_random_dedup_combo()
+        for k, var in self.dedup_vars.items():
+            var.set(bool(opts.get(k, False)))
+        if st_code in self._dedup_str_codes:
+            self.var_dedup_strength.set(self._dedup_str_labels[self._dedup_str_codes.index(st_code)])
+        self._refresh_dedup_summary("🎲 随机安全组合")
+        self._update_burn_preview()
+
+    def _on_dedup_option_toggled(self, key: str) -> None:
+        self._refresh_dedup_summary("自定义组合")
+        if key in ("micro_zoom", "micro_pan_drift", "blur_frame"):
+            self._update_burn_preview()
+
+    def _set_dedup_preset(self, enable_default: bool) -> None:
+        self._apply_dedup_preset("medium" if enable_default else "raw")
+
     def _get_burn_style_config(self) -> BurnStyleConfig:
         lbl = self.var_auto_place_label.get()
         idx = self._auto_place_labels.index(lbl) if lbl in self._auto_place_labels else 0
@@ -2403,11 +2473,6 @@ class BilingualSubStudioApp(tk.Tk):
             pos_y_ratio=round(pos_y, 4),
             note_pos_overrides={k: [float(v[0]), float(v[1])] for k, v in self._cur_note_pos_overrides.items()},
         )
-
-    def _set_dedup_preset(self, enable_default: bool) -> None:
-        for k, var in self.dedup_vars.items():
-            var.set(DEFAULT_DEDUP_OPTIONS[k] if enable_default else False)
-        self._update_burn_preview()
 
     def _update_burn_preview(self) -> None:
         if self._burn_frame_bgr is None:
@@ -2503,6 +2568,7 @@ class BilingualSubStudioApp(tk.Tk):
         enc_idx = self._enc_labels.index(self.var_enc_label.get()) if self.var_enc_label.get() in self._enc_labels else 0
         enc_code = self._enc_codes[enc_idx]
         dedup_opts = self._get_dedup_options()
+        dedup_strength = self._get_dedup_strength()
         default_style_cfg = self._style_dict_to_cfg(self._burn_default_style) if not (test_sec > 0 and self.var_burn_per_video.get()) else self._get_burn_style_config()
         per_video_styles = {name: self._style_dict_to_cfg(st_dict) for name, st_dict in self._burn_video_styles.items()}
         skip_exist = bool(self.var_burn_skip.get())
@@ -2540,6 +2606,7 @@ class BilingualSubStudioApp(tk.Tk):
                 log_cb=log,
                 cancel_event=self._cancel_event,
                 per_video_styles=per_video_styles,
+                dedup_strength=dedup_strength,
             )
 
             def _done():
